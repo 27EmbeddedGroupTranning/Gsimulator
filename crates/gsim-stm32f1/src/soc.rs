@@ -33,6 +33,12 @@ pub const DEFAULT_STEP_NS: u64 = 1_000;
 /// Maximum number of DMA transfers serviced in one simulation step.
 const MAX_DMA_TRANSFERS_PER_STEP: usize = 1024;
 
+/// Square-wave phase an oscillator shows on its pins at `now_ns`.
+fn oscillator_level(now_ns: u64, hz: u32) -> bool {
+    let half_period = (1_000_000_000 / (u64::from(hz.max(1)) * 2)).max(1);
+    (now_ns / half_period) % 2 == 0
+}
+
 /// A block attached at run time through [`Soc::attach_peripheral`].
 struct ExtraRegion {
     base: u32,
@@ -79,6 +85,10 @@ pub struct Soc {
 
     /// Crystal fitted to the board, used by [`Soc::new`].
     hse_hz: u32,
+    /// Whether the oscillator currently drives the `OSC_IN`/`OSC_OUT` pins.
+    hse_driving: bool,
+    /// Whether the RTC oscillator drives `OSC32_IN`/`OSC32_OUT`.
+    lse_driving: bool,
     now_ns: u64,
     step_ns: u64,
     sinks: Vec<Box<dyn EventSink>>,
@@ -149,6 +159,8 @@ impl Soc {
             scb: Scb::new(),
             systick: SysTick::new(),
             hse_hz,
+            hse_driving: false,
+            lse_driving: false,
             now_ns: 0,
             step_ns: DEFAULT_STEP_NS,
             sinks: Vec::new(),
@@ -165,6 +177,46 @@ impl Soc {
     /// Crystal frequency configured on OSC_IN/OSC_OUT.
     pub fn hse_hz(&self) -> u32 {
         self.hse_hz
+    }
+
+    /// Changes the crystal soldered on `OSC_IN`/`OSC_OUT`.
+    pub fn set_hse_hz(&mut self, hz: u32) {
+        self.hse_hz = hz;
+        self.rcc.set_hse_hz(hz);
+    }
+
+    /// Fits or removes the HSE crystal (`OSC_IN`/`OSC_OUT`).
+    ///
+    /// Without it `HSEON` never sets `HSERDY`, which is what a bare chip does;
+    /// the firmware's clock-tree setup decides on its own whether it wants HSE.
+    pub fn set_hse_present(&mut self, present: bool) {
+        self.rcc.set_hse_present(present);
+        // Release the pins right away, even while the clock is paused.
+        self.refresh_oscillator_pins();
+    }
+
+    pub fn hse_present(&self) -> bool {
+        self.rcc.hse_present()
+    }
+
+    /// True while the HSE oscillator is stable.
+    pub fn hse_ready(&self) -> bool {
+        self.rcc.hse_ready()
+    }
+
+    /// Fits or removes the 32.768 kHz LSE crystal (`OSC32_IN`/`OSC32_OUT`).
+    pub fn set_lse_present(&mut self, present: bool) {
+        self.rcc.set_lse_present(present);
+        self.refresh_oscillator_pins();
+    }
+
+    pub fn lse_present(&self) -> bool {
+        self.rcc.lse_present()
+    }
+
+    /// True while the 32.768 kHz LSE oscillator is stable.
+    pub fn lse_ready(&self) -> bool {
+        self.rcc.lse_ready()
     }
 
     /// Simulation time in nanoseconds.
@@ -291,6 +343,50 @@ impl Soc {
         accepted
     }
 
+    /// Bit time of the CAN controller in nanoseconds (`0` when it has no clock).
+    pub fn can_bit_time_ns(&self, unit: usize) -> u64 {
+        let cx = Ctx::new(self.now_ns, self.rcc.clocks());
+        match unit {
+            0 => self.can.bit_time_ns(&cx),
+            _ => 0,
+        }
+    }
+
+    /// Level the CAN transmitter drives on `CAN_TX`, `None` when released.
+    pub fn can_driven_level(&self, unit: usize) -> Option<bool> {
+        match unit {
+            0 => self.can.driven_level(),
+            _ => None,
+        }
+    }
+
+    /// `true` while the CAN controller is shifting a frame out.
+    pub fn can_transmitting(&self, unit: usize) -> bool {
+        unit == 0 && self.can.transmitting()
+    }
+
+    /// `true` when the CAN controller clocks its own bits (loopback/silent).
+    pub fn can_self_clocked(&self, unit: usize) -> bool {
+        unit == 0 && self.can.self_clocked()
+    }
+
+    /// Tells the CAN controller whether a bus drives its bit clock.
+    pub fn can_set_on_bus(&mut self, unit: usize, on_bus: bool) {
+        if unit == 0 {
+            self.can.set_on_bus(on_bus);
+        }
+    }
+
+    /// Feeds one sampled bit time of the wire into the CAN receiver.
+    pub fn can_sample_bit(&mut self, unit: usize, level: bool) {
+        if unit != 0 {
+            return;
+        }
+        let cx = Ctx::new(self.now_ns, self.rcc.clocks());
+        self.can.sample_bit(&cx, level);
+        self.drain_events(&cx);
+    }
+
     // ------------------------------------------------------------ simulation
 
     /// Advances the simulation by one granularity step.
@@ -317,6 +413,35 @@ impl Soc {
         self.advance_ns(milliseconds * 1_000_000);
     }
 
+    /// Drives `OSC_IN`/`OSC_OUT` (and `OSC32_IN`/`OSC32_OUT`) while the
+    /// oscillators run, and releases them when they stop.
+    fn refresh_oscillator_pins(&mut self) {
+        let now = self.now_ns;
+        if self.rcc.hse_ready() {
+            let level = oscillator_level(now, self.rcc.hse_hz());
+            // PD0 = OSC_IN, PD1 = OSC_OUT, in antiphase like the real driver.
+            self.gpio[3].set_external_level(0, level);
+            self.gpio[3].set_external_level(1, !level);
+            self.hse_driving = true;
+        } else if self.hse_driving {
+            self.gpio[3].release_pin(0);
+            self.gpio[3].release_pin(1);
+            self.hse_driving = false;
+        }
+
+        if self.rcc.lse_ready() {
+            let level = oscillator_level(now, rcc::LSE_HZ);
+            // PC14 = OSC32_IN, PC15 = OSC32_OUT.
+            self.gpio[2].set_external_level(14, level);
+            self.gpio[2].set_external_level(15, !level);
+            self.lse_driving = true;
+        } else if self.lse_driving {
+            self.gpio[2].release_pin(14);
+            self.gpio[2].release_pin(15);
+            self.lse_driving = false;
+        }
+    }
+
     fn advance_once(&mut self, dt: u64) {
         self.now_ns += dt;
         self.stats.steps += 1;
@@ -325,6 +450,9 @@ impl Soc {
         let rcc_cx = Ctx::new(self.now_ns, self.rcc.clocks());
         self.rcc.advance(&rcc_cx, dt);
         self.drain_events(&rcc_cx);
+        // A running oscillator shows up on the crystal pins, so the wires on
+        // the canvas carry the real (fast) potential instead of a flat level.
+        self.refresh_oscillator_pins();
 
         let cx = Ctx::new(self.now_ns, self.rcc.clocks());
 
@@ -446,6 +574,8 @@ impl Soc {
         for adc in &mut self.adc {
             adc.reset();
         }
+        self.hse_driving = false;
+        self.lse_driving = false;
         self.dma1.reset();
         self.dma2.reset();
         self.pwr.reset();

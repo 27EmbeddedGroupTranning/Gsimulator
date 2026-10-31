@@ -13,17 +13,18 @@ use crate::board::{
     Board, BoardState, DeviceId, DeviceKind, NetLevel, PinLevels, PinRef, Side, STUB,
 };
 use crate::library::DeviceDrag;
+use crate::route::{self, Dir};
 
-/// Size of the MCU symbol.
-const MCU_SIZE: Vec2 = Vec2::new(158.0, 22.0 + 19.0 * PIN_PITCH + 20.0);
+/// Size of the MCU symbol: a square package, like the LQFP48 it models.
+const MCU_SIZE: Vec2 = Vec2::new(330.0, 330.0);
 /// Top-left corner of the MCU symbol in board space.
 const MCU_ORIGIN: Pos2 = Pos2::new(70.0, 60.0);
 /// Distance between two pin rows.
 const PIN_PITCH: f32 = 17.0;
 /// How far the MCU pin stubs stick out.
 const MCU_STUB: f32 = 26.0;
-/// First pin row offset below the symbol's top edge.
-const FIRST_ROW: f32 = 42.0;
+/// First pin row offset below (or right of) the symbol's edge.
+const FIRST_ROW: f32 = 32.0;
 
 const COLOR_BG: Color32 = Color32::from_rgb(24, 27, 32);
 const COLOR_GRID: Color32 = Color32::from_rgb(38, 43, 51);
@@ -46,12 +47,18 @@ const COLOR_ERROR: Color32 = Color32::from_rgb(240, 100, 100);
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Selection {
     Wire(usize),
+    /// One user placed corner of a wire.
+    Bend {
+        wire: usize,
+        bend: usize,
+    },
     Device(DeviceId),
 }
 
 #[derive(Clone, Copy, Debug)]
 enum Drag {
     Device { id: DeviceId, grab: Vec2 },
+    Bend { wire: usize, bend: usize },
 }
 
 /// Persistent view and interaction state of the canvas.
@@ -68,8 +75,20 @@ pub struct Schematic {
     pending: Option<DeviceKind>,
     /// Encoder whose shaft is held down, and when to release it.
     press: Option<(DeviceId, std::time::Instant)>,
+    /// Cached orthogonal routes, one per wire, refreshed when the drawing moves.
+    routes: Vec<RoutedWire>,
+    routes_stamp: u64,
     /// Rectangle the canvas occupied in the last frame (debug/tests).
     pub last_rect: Rect,
+}
+
+/// One wire's route: a polyline in board space plus where each leg starts.
+#[derive(Clone, Debug, Default)]
+struct RoutedWire {
+    points: Vec<Pos2>,
+    /// Index in `points` where each waypoint-to-waypoint leg starts; there is
+    /// one more leg than there are bends.
+    legs: Vec<usize>,
 }
 
 impl Default for Schematic {
@@ -84,6 +103,8 @@ impl Default for Schematic {
             request_demo: false,
             pending: None,
             press: None,
+            routes: Vec::new(),
+            routes_stamp: 0,
             last_rect: Rect::NOTHING,
         }
     }
@@ -104,6 +125,11 @@ impl Schematic {
     /// Starts a wire from `pin`, used by the pin matrix in the status panel.
     pub fn request_wire_from(&mut self, pin: PinRef) {
         self.wire_from = Some(pin);
+    }
+
+    /// What the canvas has selected, for the headless tests.
+    pub fn selected(&self) -> Option<Selection> {
+        self.selected
     }
 
     pub fn cancel_wire(&mut self) {
@@ -244,6 +270,7 @@ impl Schematic {
         }
 
         // ------------------------------------------------------- hit testing
+        self.ensure_routes(board);
         let hover_pin = pointer_board.and_then(|point| self.pin_at(board, point));
         out.hover_pin = hover_pin;
 
@@ -255,7 +282,10 @@ impl Schematic {
                     match self.pin_at(board, point) {
                         Some(pin) => self.click_pin(board, pin),
                         None => {
-                            if let Some(index) = self.wire_at(board, point) {
+                            if let Some((wire, bend)) = self.bend_at(board, point) {
+                                self.selected = Some(Selection::Bend { wire, bend });
+                                self.wire_from = None;
+                            } else if let Some(index) = self.wire_at(point) {
                                 self.selected = Some(Selection::Wire(index));
                                 self.wire_from = None;
                             } else if let Some(id) = self.encoder_at(board, point) {
@@ -287,6 +317,22 @@ impl Schematic {
             }
         }
 
+        // Double clicking a wire drops a corner the user can drag, the way an
+        // EDA tool adds a bend point.
+        if response.double_clicked() && self.pending.is_none() {
+            if let Some(point) = pointer_board {
+                if self.pin_at(board, point).is_none() && self.device_at(board, point).is_none() {
+                    if let Some((wire, leg)) = self.wire_leg_at(point) {
+                        if board.insert_bend(wire, leg, point) {
+                            self.selected = Some(Selection::Bend { wire, bend: leg });
+                            self.wire_from = None;
+                            self.say("已添加拐点：拖动可调整，Delete 删除", false);
+                        }
+                    }
+                }
+            }
+        }
+
         // A card dragged out of the library window lands under the pointer.
         if let Some(dragged) = response.dnd_release_payload::<DeviceDrag>() {
             let drop_point = ui
@@ -306,11 +352,29 @@ impl Schematic {
         }
 
         if response.drag_started() && self.pending.is_none() {
-            if let Some(point) = pointer_board {
+            // A drag is recognised a few pixels after the press, so hit test at
+            // the press origin instead of under the moved pointer.
+            let origin_board = ui
+                .input(|i| i.pointer.press_origin())
+                .map(|point| self.to_board(point, origin))
+                .or(pointer_board);
+            if let Some(point) = origin_board {
                 if let Some(pin) = self.pin_at(board, point) {
                     // Dragging from a pin works like the second half of a
                     // click-click: the release on another pin completes it.
                     self.wire_from = Some(pin);
+                } else if let Some((wire, bend)) = self.bend_at(board, point) {
+                    self.selected = Some(Selection::Bend { wire, bend });
+                    self.drag = Some(Drag::Bend { wire, bend });
+                    self.wire_from = None;
+                } else if let Some((wire, leg)) = self.wire_leg_at(point) {
+                    // Grabbing a segment pulls a new corner out of it, like
+                    // dragging a wire in an EDA tool.
+                    if board.insert_bend(wire, leg, point) {
+                        self.selected = Some(Selection::Bend { wire, bend: leg });
+                        self.drag = Some(Drag::Bend { wire, bend: leg });
+                        self.wire_from = None;
+                    }
                 } else if let Some(id) = self.device_at(board, point) {
                     let device = board.device(id).expect("hit device exists");
                     self.drag = Some(Drag::Device {
@@ -321,10 +385,18 @@ impl Schematic {
                 }
             }
         }
-        if let (Some(Drag::Device { id, grab }), Some(point)) = (self.drag, pointer_board) {
-            if let Some(device) = board.device_mut(id) {
-                device.pos = point - grab;
+        match (self.drag, pointer_board) {
+            (Some(Drag::Device { id, grab }), Some(point)) => {
+                if let Some(device) = board.device_mut(id) {
+                    device.pos = point - grab;
+                }
             }
+            (Some(Drag::Bend { wire, bend }), Some(point)) => {
+                let snapped =
+                    Pos2::new((point.x / 2.0).round() * 2.0, (point.y / 2.0).round() * 2.0);
+                board.move_bend(wire, bend, snapped);
+            }
+            _ => {}
         }
         if response.drag_stopped() {
             if let (Some(_), Some(point)) = (self.wire_from, pointer_board) {
@@ -361,6 +433,12 @@ impl Schematic {
                         self.selected = None;
                     }
                 }
+                Some(Selection::Bend { wire, bend }) => {
+                    if board.remove_bend(wire, bend) {
+                        self.say("已删除拐点", false);
+                        self.selected = Some(Selection::Wire(wire));
+                    }
+                }
                 Some(Selection::Device(id)) => {
                     if let Some(device) = board.device(id) {
                         let text = format!("已删除 {}", device.name);
@@ -374,6 +452,7 @@ impl Schematic {
         }
 
         // ------------------------------------------------------------- paint
+        self.ensure_routes(board);
         self.paint_grid(&painter, origin, &response.rect);
         self.paint_wires(&painter, origin, board, state);
         for device in board.devices() {
@@ -466,16 +545,8 @@ impl Schematic {
             .map(|device| device.id)
     }
 
-    fn wire_at(&self, board: &Board, point: Pos2) -> Option<usize> {
-        let tolerance = 6.0;
-        board.wires().iter().position(|wire| {
-            let a = self.pin_pos(board, wire.a);
-            let b = self.pin_pos(board, wire.b);
-            match (a, b) {
-                (Some(a), Some(b)) => distance_to_segment(point, a, b) <= tolerance,
-                _ => false,
-            }
-        })
+    fn wire_at(&self, point: Pos2) -> Option<usize> {
+        self.wire_leg_at(point).map(|(wire, _)| wire)
     }
 
     fn pin_pos(&self, board: &Board, pin: PinRef) -> Option<Pos2> {
@@ -493,6 +564,96 @@ impl Schematic {
     fn pin_screen_pos(&self, board: &Board, origin: Pos2, pin: PinRef) -> Option<Pos2> {
         self.pin_pos(board, pin)
             .map(|pos| self.to_screen(pos, origin))
+    }
+
+    // --------------------------------------------------------------- routing
+    /// Routes every wire, reusing the cached result while the drawing holds
+    /// still (the cache is keyed on the part positions and the waypoints).
+    fn ensure_routes(&mut self, board: &Board) {
+        let stamp = topology_stamp(board);
+        if stamp == self.routes_stamp && self.routes.len() == board.wires().len() {
+            return;
+        }
+        let obstacles = obstacles_of(board);
+        self.routes = board
+            .wires()
+            .iter()
+            .map(|wire| self.route_wire(board, wire, &obstacles))
+            .collect();
+        self.routes_stamp = stamp;
+    }
+
+    fn route_wire(
+        &self,
+        board: &Board,
+        wire: &crate::board::Wire,
+        obstacles: &[Rect],
+    ) -> RoutedWire {
+        let Some(a) = self.pin_pos(board, wire.a) else {
+            return RoutedWire::default();
+        };
+        let Some(b) = self.pin_pos(board, wire.b) else {
+            return RoutedWire::default();
+        };
+        let mut waypoints = Vec::with_capacity(wire.bends.len() + 2);
+        waypoints.push(a);
+        waypoints.extend(wire.bends.iter().copied());
+        waypoints.push(b);
+
+        let last = waypoints.len() - 1;
+        let mut routed = RoutedWire::default();
+        for (leg, pair) in waypoints.windows(2).enumerate() {
+            let start_side = (leg == 0).then(|| pin_dir(board, wire.a)).flatten();
+            let goal_side = (leg + 1 == last).then(|| pin_dir(board, wire.b)).flatten();
+            let points = route::route(pair[0], start_side, pair[1], goal_side, obstacles);
+            routed.legs.push(routed.points.len());
+            let skip = usize::from(leg > 0);
+            routed.points.extend(points.into_iter().skip(skip));
+        }
+        routed
+    }
+
+    /// Nearest wire leg under `point`, as `(wire, leg)`.
+    fn wire_leg_at(&self, point: Pos2) -> Option<(usize, usize)> {
+        let tolerance = 7.0;
+        let mut best: Option<(f32, usize, usize)> = None;
+        for (index, route) in self.routes.iter().enumerate() {
+            for leg in 0..route.legs.len() {
+                let from = route.legs[leg];
+                let to = route
+                    .legs
+                    .get(leg + 1)
+                    .copied()
+                    .unwrap_or(route.points.len());
+                for pair in route.points[from..to].windows(2) {
+                    let distance = distance_to_segment(point, pair[0], pair[1]);
+                    if distance <= tolerance
+                        && best.is_none_or(|(best_distance, _, _)| distance < best_distance)
+                    {
+                        best = Some((distance, index, leg));
+                    }
+                }
+            }
+        }
+        best.map(|(_, wire, leg)| (wire, leg))
+    }
+
+    /// Corner (waypoint) under `point`, as `(wire, bend)`.
+    fn bend_at(&self, board: &Board, point: Pos2) -> Option<(usize, usize)> {
+        let radius = 8.0;
+        board
+            .wires()
+            .iter()
+            .enumerate()
+            .flat_map(|(index, wire)| {
+                wire.bends
+                    .iter()
+                    .enumerate()
+                    .map(move |(bend, at)| (index, bend, *at))
+            })
+            .filter(|(_, _, at)| at.distance(point) <= radius)
+            .min_by(|left, right| left.2.distance(point).total_cmp(&right.2.distance(point)))
+            .map(|(index, bend, _)| (index, bend))
     }
 
     // --------------------------------------------------------------- painting
@@ -537,14 +698,14 @@ impl Schematic {
         );
 
         painter.text(
-            Pos2::new(screen.center().x, screen.top() + 14.0 * self.zoom),
+            Pos2::new(screen.center().x, screen.center().y - 12.0 * self.zoom),
             Align2::CENTER_CENTER,
             "STM32F103C8T6",
-            self.font(12.0),
+            self.font(13.0),
             COLOR_TEXT,
         );
         painter.text(
-            Pos2::new(screen.center().x, screen.top() + 28.0 * self.zoom),
+            Pos2::new(screen.center().x, screen.center().y + 6.0 * self.zoom),
             Align2::CENTER_CENTER,
             "Cortex-M3 · 72 MHz",
             self.font(9.0),
@@ -556,6 +717,8 @@ impl Schematic {
             let base = match side {
                 Side::Left => Pos2::new(screen.left(), tip.y),
                 Side::Right => Pos2::new(screen.right(), tip.y),
+                Side::Top => Pos2::new(tip.x, screen.top()),
+                Side::Bottom => Pos2::new(tip.x, screen.bottom()),
             };
             let level = levels.level_of(port, pin);
             let is_output = levels.is_output(port, pin);
@@ -582,17 +745,27 @@ impl Schematic {
                     .unwrap_or("?"),
                 pin
             );
-            let text_pos = match side {
-                Side::Left => Pos2::new(screen.left() + 10.0 * self.zoom, tip.y),
-                Side::Right => Pos2::new(screen.right() - 10.0 * self.zoom, tip.y),
+            let (text_pos, align) = match side {
+                Side::Left => (
+                    Pos2::new(screen.left() + 10.0 * self.zoom, tip.y),
+                    Align2::LEFT_CENTER,
+                ),
+                Side::Right => (
+                    Pos2::new(screen.right() - 10.0 * self.zoom, tip.y),
+                    Align2::RIGHT_CENTER,
+                ),
+                Side::Top => (
+                    Pos2::new(tip.x, screen.top() + 8.0 * self.zoom),
+                    Align2::CENTER_TOP,
+                ),
+                Side::Bottom => (
+                    Pos2::new(tip.x, screen.bottom() - 8.0 * self.zoom),
+                    Align2::CENTER_BOTTOM,
+                ),
             };
             painter.text(
                 text_pos,
-                if side == Side::Left {
-                    Align2::LEFT_CENTER
-                } else {
-                    Align2::RIGHT_CENTER
-                },
+                align,
                 label,
                 self.font(9.5),
                 if is_hovered {
@@ -612,11 +785,17 @@ impl Schematic {
         state: &BoardState,
     ) {
         for (index, wire) in board.wires().iter().enumerate() {
-            let (Some(a), Some(b)) = (self.pin_pos(board, wire.a), self.pin_pos(board, wire.b))
-            else {
+            let Some(route) = self.routes.get(index) else {
                 continue;
             };
-            let selected = self.selected == Some(Selection::Wire(index));
+            if route.points.len() < 2 {
+                continue;
+            }
+            let selected = match self.selected {
+                Some(Selection::Wire(selected)) => selected == index,
+                Some(Selection::Bend { wire, .. }) => wire == index,
+                _ => false,
+            };
             let net_level = state
                 .nets
                 .iter()
@@ -635,13 +814,43 @@ impl Schematic {
                 }
             };
             let width = if selected { 3.0 } else { 2.0 };
-            let points = wire_points(self.to_screen(a, origin), self.to_screen(b, origin));
+            let points: Vec<Pos2> = route
+                .points
+                .iter()
+                .map(|point| self.to_screen(*point, origin))
+                .collect();
             painter.add(egui::Shape::line(
                 points.clone(),
                 Stroke::new(self.stroke(width), color),
             ));
             painter.circle_filled(points[0], self.stroke(2.5), color);
             painter.circle_filled(*points.last().expect("non-empty"), self.stroke(2.5), color);
+
+            // Corner handles: always visible on the selected wire, bigger while
+            // one is being dragged.
+            for (bend, at) in wire.bends.iter().enumerate() {
+                let selected_bend = self.selected == Some(Selection::Bend { wire: index, bend });
+                if !selected && !selected_bend {
+                    continue;
+                }
+                let center = self.to_screen(*at, origin);
+                let size = if selected_bend { 8.0 } else { 6.0 } * self.zoom.max(0.6);
+                painter.rect_filled(
+                    Rect::from_center_size(center, Vec2::splat(size)),
+                    1.5,
+                    if selected_bend {
+                        Color32::WHITE
+                    } else {
+                        COLOR_WIRE_SELECTED
+                    },
+                );
+                painter.rect_stroke(
+                    Rect::from_center_size(center, Vec2::splat(size)),
+                    1.5,
+                    Stroke::new(1.0, Color32::from_rgb(30, 34, 40)),
+                    StrokeKind::Inside,
+                );
+            }
         }
     }
 
@@ -696,7 +905,10 @@ impl Schematic {
                     );
                 }
                 painter.line_segment(
-                    [Pos2::new(center.x, center.y - len * 0.9), Pos2::new(center.x, center.y - len * 0.4)],
+                    [
+                        Pos2::new(center.x, center.y - len * 0.9),
+                        Pos2::new(center.x, center.y - len * 0.4),
+                    ],
                     Stroke::new(self.stroke(2.0), base),
                 );
             }
@@ -715,26 +927,25 @@ impl Schematic {
             return;
         };
         let transceiver = transceiver.borrow();
-        let left = rect.left() + 8.0 * self.zoom;
         painter.text(
-            Pos2::new(left, rect.top() + 7.0 * self.zoom),
-            Align2::LEFT_TOP,
+            Pos2::new(rect.center().x, rect.top() + 7.0 * self.zoom),
+            Align2::CENTER_TOP,
             "CAN",
             self.font(9.5),
             base,
         );
         painter.text(
-            Pos2::new(left, rect.center().y - 2.0 * self.zoom),
-            Align2::LEFT_CENTER,
+            rect.center(),
+            Align2::CENTER_CENTER,
             transceiver.mode().label(),
             self.font(9.0),
             COLOR_TEXT,
         );
         painter.text(
-            Pos2::new(left, rect.bottom() - 7.0 * self.zoom),
-            Align2::LEFT_BOTTOM,
+            Pos2::new(rect.center().x, rect.bottom() - 7.0 * self.zoom),
+            Align2::CENTER_BOTTOM,
             format!(
-                "↑{} ↓{}",
+                "发 {} 收 {}",
                 transceiver.stats().tx_frames,
                 transceiver.stats().rx_frames
             ),
@@ -760,11 +971,14 @@ impl Schematic {
             .first()
             .map(|chip| chip.pixels())
             .unwrap_or([[false; 8]; 8]);
-        let grid = rect.shrink(8.0 * self.zoom);
-        let cell = grid.width().min(grid.height()) / 8.0;
-        let origin = Pos2::new(
-            grid.center().x - cell * 4.0,
-            grid.center().y - cell * 4.0,
+        // Keep the pin labels on the left and right readable.
+        let side = (rect.width().min(rect.height()) * 0.52).max(20.0);
+        let cell = side / 8.0;
+        let origin = Pos2::new(rect.center().x - side * 0.5, rect.center().y - side * 0.5);
+        painter.rect_filled(
+            Rect::from_min_size(origin, Vec2::splat(side)).expand(cell * 0.3),
+            cell * 0.3,
+            Color32::from_rgb(26, 30, 36),
         );
         for (row, line) in pixels.iter().enumerate() {
             for (column, lit) in line.iter().enumerate() {
@@ -776,9 +990,173 @@ impl Schematic {
                 painter.rect_filled(
                     dot,
                     cell * 0.15,
-                    if *lit { base } else { Color32::from_rgb(46, 52, 62) },
+                    if *lit {
+                        base
+                    } else {
+                        Color32::from_rgb(46, 52, 62)
+                    },
                 );
             }
+        }
+    }
+
+    /// Zig-zag resistor with its value in the middle.
+    fn paint_resistor_symbol(
+        &self,
+        painter: &egui::Painter,
+        rect: Rect,
+        base: Color32,
+        device: &crate::board::Device,
+    ) {
+        let center = rect.center();
+        let half = rect.width() * 0.17;
+        let amplitude = rect.height() * 0.22;
+        let stroke = Stroke::new(self.stroke(1.5), base);
+        painter.line_segment(
+            [
+                Pos2::new(rect.left() + 6.0, center.y),
+                Pos2::new(center.x - half, center.y),
+            ],
+            stroke,
+        );
+        let mut points = vec![Pos2::new(center.x - half, center.y)];
+        for step in 0..6 {
+            let x = center.x - half + half * 2.0 * (step as f32 + 0.5) / 6.0;
+            let y = center.y + if step % 2 == 0 { -amplitude } else { amplitude };
+            points.push(Pos2::new(x, y));
+        }
+        points.push(Pos2::new(center.x + half, center.y));
+        painter.add(egui::Shape::line(points, stroke));
+        painter.line_segment(
+            [
+                Pos2::new(center.x + half, center.y),
+                Pos2::new(rect.right() - 6.0, center.y),
+            ],
+            stroke,
+        );
+        if let Some(resistor) = device.hardware.resistor() {
+            painter.text(
+                Pos2::new(center.x, center.y - amplitude - 2.0 * self.zoom),
+                Align2::CENTER_BOTTOM,
+                resistor.label(),
+                self.font(9.0),
+                base,
+            );
+        }
+    }
+
+    /// Small screen showing what the probe is currently capturing.
+    fn paint_scope_symbol(
+        &self,
+        painter: &egui::Painter,
+        rect: Rect,
+        base: Color32,
+        device: &crate::board::Device,
+    ) {
+        let screen = rect.shrink2(Vec2::new(rect.width() * 0.10, rect.height() * 0.14));
+        painter.rect_filled(screen, 3.0, Color32::from_rgb(12, 20, 18));
+        painter.rect_stroke(
+            screen,
+            3.0,
+            Stroke::new(self.stroke(1.0), base.gamma_multiply(0.8)),
+            StrokeKind::Inside,
+        );
+        let Some(scope) = device.hardware.scope() else {
+            return;
+        };
+        let scope = scope.borrow();
+        let samples = scope.samples();
+        let Some(first) = samples.front().map(|sample| sample.time_ns) else {
+            painter.text(
+                screen.center(),
+                Align2::CENTER_CENTER,
+                "无信号",
+                self.font(8.5),
+                COLOR_DIM,
+            );
+            return;
+        };
+        let last = samples.back().map(|sample| sample.time_ns).unwrap_or(first);
+        let span = last.saturating_sub(first).max(1);
+        let trace = |value: fn(&gsim_devices::ScopeSample) -> f32| {
+            samples
+                .iter()
+                .map(|sample| {
+                    Pos2::new(
+                        screen.left()
+                            + screen.width() * (sample.time_ns - first) as f32 / span as f32,
+                        // 1 V .. 4 V across the screen height.
+                        screen.bottom()
+                            - screen.height() * ((value(sample) - 1.0) / 3.0).clamp(0.0, 1.0),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        painter.add(egui::Shape::line(
+            trace(|sample| sample.can_h),
+            Stroke::new(self.stroke(1.0), Color32::from_rgb(250, 210, 90)),
+        ));
+        painter.add(egui::Shape::line(
+            trace(|sample| sample.can_l),
+            Stroke::new(self.stroke(1.0), Color32::from_rgb(90, 200, 240)),
+        ));
+        painter.text(
+            Pos2::new(screen.center().x, rect.bottom() - 3.0 * self.zoom),
+            Align2::CENTER_BOTTOM,
+            format!("{:.1} V", scope.peak_differential()),
+            self.font(8.0),
+            COLOR_DIM,
+        );
+    }
+
+    /// Quartz symbol: two plates and the frequency, with leads to `X1`/`X2`.
+    fn paint_crystal_symbol(
+        &self,
+        painter: &egui::Painter,
+        rect: Rect,
+        base: Color32,
+        device: &crate::board::Device,
+    ) {
+        let center = rect.center();
+        let plate_height = rect.height() * 0.30;
+        let spacing = rect.width() * 0.16;
+        let left = center.x - spacing;
+        let right = center.x + spacing;
+        let stroke = Stroke::new(self.stroke(1.5), base);
+        painter.line_segment(
+            [
+                Pos2::new(rect.left() + 6.0, center.y),
+                Pos2::new(left, center.y),
+            ],
+            stroke,
+        );
+        painter.line_segment(
+            [
+                Pos2::new(right, center.y),
+                Pos2::new(rect.right() - 6.0, center.y),
+            ],
+            stroke,
+        );
+        for x in [left, right] {
+            painter.line_segment(
+                [
+                    Pos2::new(x, center.y - plate_height * 0.5),
+                    Pos2::new(x, center.y + plate_height * 0.5),
+                ],
+                stroke,
+            );
+        }
+        let body = Rect::from_center_size(center, Vec2::new(spacing * 0.9, plate_height * 0.8));
+        painter.rect_filled(body, 2.0, base.gamma_multiply(0.35));
+        painter.rect_stroke(body, 2.0, stroke, StrokeKind::Inside);
+        if let Some(crystal) = device.hardware.crystal() {
+            painter.text(
+                center,
+                Align2::CENTER_CENTER,
+                crystal.frequency_label(),
+                self.font(9.0),
+                COLOR_TEXT,
+            );
         }
     }
 
@@ -794,7 +1172,12 @@ impl Schematic {
             self.to_screen(device.rect().max, origin),
         );
         let selected = self.selected == Some(Selection::Device(device.id));
-        let base = device.accent.color32();
+        let base = match device.kind {
+            // Keep the bus parts in the colour they have in the library.
+            DeviceKind::Can => Color32::from_rgb(245, 200, 60),
+            DeviceKind::Matrix => Color32::from_rgb(70, 200, 255),
+            _ => device.accent.color32(),
+        };
         if device.kind.is_power() {
             self.paint_power_symbol(painter, rect, device.kind, selected);
         } else {
@@ -831,6 +1214,11 @@ impl Schematic {
                 DeviceKind::Encoder => self.paint_encoder_symbol(painter, rect, base, device),
                 DeviceKind::Can => self.paint_can_symbol(painter, rect, base, device),
                 DeviceKind::Matrix => self.paint_matrix_symbol(painter, rect, base, device),
+                DeviceKind::HseCrystal | DeviceKind::LseCrystal => {
+                    self.paint_crystal_symbol(painter, rect, base, device)
+                }
+                DeviceKind::Resistor => self.paint_resistor_symbol(painter, rect, base, device),
+                DeviceKind::Scope => self.paint_scope_symbol(painter, rect, base, device),
                 DeviceKind::Vcc | DeviceKind::Gnd => {}
             }
         }
@@ -849,30 +1237,31 @@ impl Schematic {
 
         for (index, def) in device.kind.pins().iter().enumerate() {
             let tip = self.to_screen(device.pin_pos(index as u8), origin);
-            let base_pos = match def.side {
-                Side::Left => Pos2::new(rect.left(), tip.y),
-                Side::Right => Pos2::new(rect.right(), tip.y),
+            let (base_pos, text_pos, align) = match def.side {
+                Side::Left => (
+                    Pos2::new(rect.left(), tip.y),
+                    Pos2::new(rect.left() + 6.0 * self.zoom, tip.y - 7.0 * self.zoom),
+                    Align2::LEFT_BOTTOM,
+                ),
+                Side::Right => (
+                    Pos2::new(rect.right(), tip.y),
+                    Pos2::new(rect.right() - 6.0 * self.zoom, tip.y - 7.0 * self.zoom),
+                    Align2::RIGHT_BOTTOM,
+                ),
+                Side::Top => (
+                    Pos2::new(tip.x, rect.top()),
+                    Pos2::new(tip.x, rect.top() + 6.0 * self.zoom),
+                    Align2::CENTER_TOP,
+                ),
+                Side::Bottom => (
+                    Pos2::new(tip.x, rect.bottom()),
+                    Pos2::new(tip.x, rect.bottom() - 6.0 * self.zoom),
+                    Align2::CENTER_BOTTOM,
+                ),
             };
             painter.line_segment([base_pos, tip], Stroke::new(self.stroke(1.6), COLOR_WIRE));
             painter.circle_filled(tip, self.stroke(3.0), COLOR_WIRE);
-            painter.text(
-                Pos2::new(
-                    if def.side == Side::Left {
-                        rect.left() + 6.0 * self.zoom
-                    } else {
-                        rect.right() - 6.0 * self.zoom
-                    },
-                    tip.y - 7.0 * self.zoom,
-                ),
-                if def.side == Side::Left {
-                    Align2::LEFT_BOTTOM
-                } else {
-                    Align2::RIGHT_BOTTOM
-                },
-                def.name,
-                self.font(8.5),
-                COLOR_DIM,
-            );
+            painter.text(text_pos, align, def.name, self.font(8.5), COLOR_DIM);
         }
     }
 
@@ -903,30 +1292,33 @@ impl Schematic {
             let base = match def.side {
                 Side::Left => Pos2::new(rect.left(), tip.y),
                 Side::Right => Pos2::new(rect.right(), tip.y),
+                Side::Top => Pos2::new(tip.x, rect.top()),
+                Side::Bottom => Pos2::new(tip.x, rect.bottom()),
             };
             painter.line_segment(
                 [base, tip],
                 Stroke::new(self.stroke(1.6), outline.gamma_multiply(0.8)),
             );
             painter.circle_filled(tip, self.stroke(3.0), outline);
-            painter.text(
-                Pos2::new(
-                    if def.side == Side::Left {
-                        rect.left() + 6.0 * self.zoom
-                    } else {
-                        rect.right() - 6.0 * self.zoom
-                    },
-                    tip.y - 7.0 * self.zoom,
+            let (label_pos, align) = match def.side {
+                Side::Left => (
+                    Pos2::new(rect.left() + 6.0 * self.zoom, tip.y - 7.0 * self.zoom),
+                    Align2::LEFT_BOTTOM,
                 ),
-                if def.side == Side::Left {
-                    Align2::LEFT_BOTTOM
-                } else {
-                    Align2::RIGHT_BOTTOM
-                },
-                def.name,
-                self.font(8.5),
-                COLOR_DIM,
-            );
+                Side::Right => (
+                    Pos2::new(rect.right() - 6.0 * self.zoom, tip.y - 7.0 * self.zoom),
+                    Align2::RIGHT_BOTTOM,
+                ),
+                Side::Top => (
+                    Pos2::new(tip.x, rect.top() + 6.0 * self.zoom),
+                    Align2::CENTER_TOP,
+                ),
+                Side::Bottom => (
+                    Pos2::new(tip.x, rect.bottom() - 6.0 * self.zoom),
+                    Align2::CENTER_BOTTOM,
+                ),
+            };
+            painter.text(label_pos, align, def.name, self.font(8.5), COLOR_DIM);
         }
     }
 
@@ -1142,33 +1534,106 @@ pub fn content_bounds(board: &Board) -> Rect {
     bounds
 }
 
-/// Screen positions of every MCU pin, in board space.
+/// Board space positions of every MCU pin.
+///
+/// The package is drawn as a square: port A on the left, port B on the right,
+/// the watch crystal pins of port C on the bottom edge and the HSE pins of port
+/// D on the top edge, the way an EDA symbol lays them out.
 fn mcu_pin_layout() -> Vec<(u8, u8, Side, Pos2)> {
-    let mut pins = Vec::with_capacity(35);
+    let mut pins = Vec::with_capacity(37);
     let left_x = MCU_ORIGIN.x - MCU_STUB;
     let right_x = MCU_ORIGIN.x + MCU_SIZE.x + MCU_STUB;
+    let top_y = MCU_ORIGIN.y - MCU_STUB;
+    let bottom_y = MCU_ORIGIN.y + MCU_SIZE.y + MCU_STUB;
+
     for pin in 0..16u8 {
         let y = MCU_ORIGIN.y + FIRST_ROW + f32::from(pin) * PIN_PITCH;
         pins.push((0u8, pin, Side::Left, Pos2::new(left_x, y)));
     }
-    let mut row = 0u8;
     for pin in 0..16u8 {
-        let y = MCU_ORIGIN.y + FIRST_ROW + f32::from(row) * PIN_PITCH;
+        let y = MCU_ORIGIN.y + FIRST_ROW + f32::from(pin) * PIN_PITCH;
         pins.push((1u8, pin, Side::Right, Pos2::new(right_x, y)));
-        row += 1;
     }
-    for pin in 13..16u8 {
-        let y = MCU_ORIGIN.y + FIRST_ROW + f32::from(row) * PIN_PITCH;
-        pins.push((2u8, pin, Side::Right, Pos2::new(right_x, y)));
-        row += 1;
+    // PC13..PC15 (LSE crystal and the user button on a Blue Pill): spread along
+    // the bottom edge so their labels stay readable.
+    for (index, pin) in (13..16u8).enumerate() {
+        let fraction = (index as f32 + 1.0) / 4.0;
+        let x = MCU_ORIGIN.x + MCU_SIZE.x * fraction;
+        pins.push((2u8, pin, Side::Bottom, Pos2::new(x, bottom_y)));
+    }
+    // OSC_IN / OSC_OUT of the HSE crystal (PD0/PD1) on the top edge.
+    for (index, pin) in (0..2u8).enumerate() {
+        let fraction = match index {
+            0 => 0.25,
+            _ => 0.75,
+        };
+        let x = MCU_ORIGIN.x + MCU_SIZE.x * fraction;
+        pins.push((3u8, pin, Side::Top, Pos2::new(x, top_y)));
     }
     pins
 }
 
-/// Orthogonal (EDA style) routing between two points.
-fn wire_points(a: Pos2, b: Pos2) -> Vec<Pos2> {
-    let mid_x = (a.x + b.x) * 0.5;
-    vec![a, Pos2::new(mid_x, a.y), Pos2::new(mid_x, b.y), b]
+/// Bodies the wires have to go around, in board space.
+///
+/// Every symbol (including the MCU and the power flags) is inflated by the
+/// router's clearance so the wire keeps a readable distance from the drawing.
+pub fn obstacles_of(board: &Board) -> Vec<Rect> {
+    let mut obstacles = Vec::with_capacity(board.devices().len() + 1);
+    obstacles.push(Rect::from_min_size(MCU_ORIGIN, MCU_SIZE).expand(route::CLEARANCE));
+    for device in board.devices() {
+        obstacles.push(device.rect().expand(route::CLEARANCE));
+    }
+    obstacles
+}
+
+/// Direction a pin leaves its body.
+fn pin_dir(board: &Board, pin: PinRef) -> Option<Dir> {
+    match pin {
+        PinRef::Mcu { port, pin } => mcu_pin_layout()
+            .into_iter()
+            .find(|(layout_port, layout_pin, _, _)| *layout_port == port && *layout_pin == pin)
+            .map(|(_, _, side, _)| dir_of(side)),
+        PinRef::Device { device, pin } => board
+            .device(device)
+            .and_then(|device| device.pin_def(pin))
+            .map(|def| dir_of(def.side)),
+    }
+}
+
+fn dir_of(side: Side) -> Dir {
+    match side {
+        Side::Left => Dir::Left,
+        Side::Right => Dir::Right,
+        Side::Top => Dir::Up,
+        Side::Bottom => Dir::Down,
+    }
+}
+
+/// Fingerprint of everything a route depends on: the part bodies, the wire
+/// endpoints and the user placed corners. Cheap enough to hash every frame.
+fn topology_stamp(board: &Board) -> u64 {
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    MCU_ORIGIN.x.to_bits().hash(&mut hasher);
+    MCU_ORIGIN.y.to_bits().hash(&mut hasher);
+    for device in board.devices() {
+        let rect = device.rect();
+        device.id.hash(&mut hasher);
+        device.kind.hash(&mut hasher);
+        for value in [rect.left(), rect.top(), rect.right(), rect.bottom()] {
+            value.to_bits().hash(&mut hasher);
+        }
+    }
+    for wire in board.wires() {
+        wire.a.hash(&mut hasher);
+        wire.b.hash(&mut hasher);
+        for bend in &wire.bends {
+            bend.x.to_bits().hash(&mut hasher);
+            bend.y.to_bits().hash(&mut hasher);
+        }
+    }
+    hasher.finish()
 }
 
 fn distance_to_segment(point: Pos2, a: Pos2, b: Pos2) -> f32 {
@@ -1188,23 +1653,25 @@ mod tests {
     #[test]
     fn mcu_layout_covers_every_bonded_pin() {
         let pins = mcu_pin_layout();
-        assert_eq!(pins.len(), 35);
+        assert_eq!(pins.len(), 37);
         assert!(pins.iter().any(|(p, n, _, _)| *p == 0 && *n == 5));
         assert!(pins.iter().any(|(p, n, _, _)| *p == 2 && *n == 13));
+        // OSC_IN / OSC_OUT for the HSE crystal.
+        assert!(pins.iter().any(|(p, n, _, _)| *p == 3 && *n == 0));
+        assert!(pins.iter().any(|(p, n, _, _)| *p == 3 && *n == 1));
         // No duplicates.
         let mut seen = pins.iter().map(|(p, n, _, _)| (*p, *n)).collect::<Vec<_>>();
         seen.sort_unstable();
         seen.dedup();
-        assert_eq!(seen.len(), 35);
+        assert_eq!(seen.len(), 37);
     }
 
     #[test]
     fn routing_uses_orthogonal_segments() {
-        let points = wire_points(Pos2::new(0.0, 0.0), Pos2::new(100.0, 50.0));
-        assert_eq!(points.len(), 4);
+        let points = route::route_between(Pos2::new(0.0, 0.0), Pos2::new(100.0, 50.0), &[]);
+        assert_eq!(points.len(), 3);
         assert_eq!(points[0].y, points[1].y);
         assert_eq!(points[1].x, points[2].x);
-        assert_eq!(points[2].y, points[3].y);
     }
 
     #[test]
@@ -1230,6 +1697,198 @@ mod tests {
         assert!((back - board_point).length() < 1e-3);
     }
 
+    /// Runs one canvas frame with the given input events.
+    fn canvas_frame(
+        ctx: &egui::Context,
+        schematic: &mut Schematic,
+        board: &mut Board,
+        events: Vec<egui::Event>,
+    ) -> egui::FullOutput {
+        let levels = PinLevels::default();
+        let state = board.evaluate(&levels);
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1200.0, 800.0))),
+            events,
+            ..Default::default()
+        };
+        ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                schematic.show(ui, board, &levels, &state, 0);
+            });
+        })
+    }
+
+    /// A board whose wire has to go around a part parked between the pins.
+    fn blocked_board() -> (Board, DeviceId) {
+        let mut board = Board::new();
+        let led = board.add_led(Pos2::new(700.0, 300.0));
+        board.add_uart(Pos2::new(520.0, 250.0));
+        board.connect(
+            PinRef::Mcu { port: 0, pin: 5 },
+            PinRef::Device {
+                device: led,
+                pin: 0,
+            },
+        );
+        (board, led)
+    }
+
+    #[test]
+    fn a_wire_goes_around_the_parts_instead_of_through_them() {
+        let (mut board, _) = blocked_board();
+        let mut schematic = Schematic::default();
+        let ctx = egui::Context::default();
+        canvas_frame(&ctx, &mut schematic, &mut board, Vec::new());
+        canvas_frame(&ctx, &mut schematic, &mut board, Vec::new());
+
+        let route = schematic.routes[0].points.clone();
+        assert!(route.len() >= 3, "the wire must have at least one corner");
+        assert!(route::orthogonal(&route), "{route:?}");
+        let obstacles = obstacles_of(&board);
+        assert!(
+            !route::collides(&route, &obstacles),
+            "the wire runs through a part: {route:?}"
+        );
+        // It really detours: no straight line would fit between the two pins.
+        let start = *route.first().unwrap();
+        let goal = *route.last().unwrap();
+        let straight = (goal.x - start.x).abs() + (goal.y - start.y).abs();
+        assert!(
+            route::length(&route) > straight * 1.05,
+            "the wire did not detour: {route:?}"
+        );
+    }
+
+    #[test]
+    fn clicking_a_wire_selects_it_and_double_clicking_adds_a_corner() {
+        let (mut board, _) = blocked_board();
+        let mut schematic = Schematic::default();
+        let ctx = egui::Context::default();
+        canvas_frame(&ctx, &mut schematic, &mut board, Vec::new());
+        canvas_frame(&ctx, &mut schematic, &mut board, Vec::new());
+
+        // Click the middle of a horizontal run of the route.
+        let route = schematic.routes[0].points.clone();
+        let segment = route
+            .windows(2)
+            .find(|pair| (pair[0].y - pair[1].y).abs() < 0.5 && (pair[1] - pair[0]).length() > 30.0)
+            .expect("a horizontal run");
+        let middle = Pos2::new((segment[0].x + segment[1].x) * 0.5, segment[0].y);
+        let origin = schematic.last_rect.min;
+        let screen = schematic.to_screen(middle, origin);
+
+        canvas_frame(
+            &ctx,
+            &mut schematic,
+            &mut board,
+            vec![egui::Event::PointerMoved(screen)],
+        );
+        canvas_frame(
+            &ctx,
+            &mut schematic,
+            &mut board,
+            vec![
+                egui::Event::PointerButton {
+                    pos: screen,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::default(),
+                },
+                egui::Event::PointerButton {
+                    pos: screen,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::default(),
+                },
+            ],
+        );
+        assert_eq!(schematic.selected(), Some(Selection::Wire(0)));
+
+        // A double click on the same spot drops a corner there.
+        canvas_frame(
+            &ctx,
+            &mut schematic,
+            &mut board,
+            vec![
+                egui::Event::PointerButton {
+                    pos: screen,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::default(),
+                },
+                egui::Event::PointerButton {
+                    pos: screen,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::default(),
+                },
+            ],
+        );
+        assert_eq!(
+            board.wires()[0].bends.len(),
+            1,
+            "double click adds a corner"
+        );
+        assert_eq!(
+            schematic.selected(),
+            Some(Selection::Bend { wire: 0, bend: 0 })
+        );
+
+        // The selected corner is drawn as a handle the user can grab.
+        let output = canvas_frame(&ctx, &mut schematic, &mut board, Vec::new());
+        assert!(
+            filled_rects(&output, Color32::WHITE) > 0,
+            "the corner handle was not painted"
+        );
+    }
+
+    #[test]
+    fn dragging_a_segment_pulls_a_corner_out_of_it() {
+        let (mut board, _) = blocked_board();
+        let mut schematic = Schematic::default();
+        let ctx = egui::Context::default();
+        canvas_frame(&ctx, &mut schematic, &mut board, Vec::new());
+        canvas_frame(&ctx, &mut schematic, &mut board, Vec::new());
+
+        let route = schematic.routes[0].points.clone();
+        let segment = route
+            .windows(2)
+            .find(|pair| (pair[0].y - pair[1].y).abs() < 0.5 && (pair[1] - pair[0]).length() > 30.0)
+            .expect("a horizontal run");
+        let middle = Pos2::new((segment[0].x + segment[1].x) * 0.5, segment[0].y);
+        let origin = schematic.last_rect.min;
+        let grab = schematic.to_screen(middle, origin);
+        let target = grab + Vec2::new(0.0, 60.0);
+
+        for events in [
+            vec![egui::Event::PointerMoved(grab)],
+            vec![egui::Event::PointerButton {
+                pos: grab,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::default(),
+            }],
+            vec![egui::Event::PointerMoved(grab + Vec2::new(0.0, 20.0))],
+            vec![egui::Event::PointerMoved(target)],
+            vec![egui::Event::PointerButton {
+                pos: target,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::default(),
+            }],
+        ] {
+            canvas_frame(&ctx, &mut schematic, &mut board, events);
+        }
+
+        assert_eq!(board.wires()[0].bends.len(), 1, "a corner was pulled out");
+        let bend = board.wires()[0].bends[0];
+        let expected = schematic.to_board(target, origin);
+        assert!(
+            (bend - expected).length() < 6.0,
+            "the corner should follow the pointer ({bend:?} vs {expected:?})"
+        );
+    }
+
     /// Filled rectangles that use the ghost preview colour.
     fn ghost_rects(output: &egui::FullOutput) -> usize {
         fn walk(shape: &egui::Shape, count: &mut usize) {
@@ -1246,6 +1905,26 @@ mod tests {
         let mut count = 0;
         for clipped in &output.shapes {
             walk(&clipped.shape, &mut count);
+        }
+        count
+    }
+
+    /// Filled rectangles painted with `color`.
+    fn filled_rects(output: &egui::FullOutput, color: Color32) -> usize {
+        fn walk(shape: &egui::Shape, color: Color32, count: &mut usize) {
+            match shape {
+                egui::Shape::Rect(rect) if rect.fill == color => *count += 1,
+                egui::Shape::Vec(shapes) => {
+                    for shape in shapes {
+                        walk(shape, color, count);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut count = 0;
+        for clipped in &output.shapes {
+            walk(&clipped.shape, color, &mut count);
         }
         count
     }

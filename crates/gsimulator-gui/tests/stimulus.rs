@@ -130,6 +130,7 @@ fn a_custom_function_drives_the_pin() {
 #[test]
 fn invalid_settings_are_rejected_and_keep_the_running_waveform() {
     let mut sim = Simulation::new();
+    sim.start_stimulus();
     let before = sim.stimulus().clone();
 
     assert!(sim
@@ -209,6 +210,7 @@ fn reconfiguring_while_running_keeps_running() {
     let mut sim = Simulation::new();
     sim.set_stimulus_config(square(1, 13, 10_000_000, 0.5))
         .expect("config must be valid");
+    sim.start_stimulus();
     assert!(sim.is_running());
     assert_eq!(sim.stimulus().pin, 13);
     assert!(sim.pin_levels().is_output(1, 13));

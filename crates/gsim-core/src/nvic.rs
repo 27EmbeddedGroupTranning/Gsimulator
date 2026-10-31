@@ -412,6 +412,43 @@ impl Nvic {
     }
 }
 
+impl Nvic {
+    /// Labelled state for the peripheral status browser.
+    pub fn status(&self, _clocks: &crate::Clocks) -> Vec<(&'static str, String)> {
+        let active = self
+            .active
+            .iter()
+            .map(|word| word.count_ones())
+            .sum::<u32>();
+        let enabled = self
+            .enabled
+            .iter()
+            .map(|word| word.count_ones())
+            .sum::<u32>();
+        vec![
+            ("已使能中断", format!("{enabled}")),
+            ("挂起中断", format!("{}", self.pending_count())),
+            ("活动中断", format!("{active}")),
+            (
+                "当前异常",
+                match self.current_exception() {
+                    Some(number) => format!("#{number}"),
+                    None => "无".to_string(),
+                },
+            ),
+            ("嵌套深度", format!("{}", self.nesting_depth())),
+            (
+                "PRIMASK / BASEPRI",
+                format!(
+                    "{} / 0x{:02X}",
+                    if self.primask { 1 } else { 0 },
+                    self.basepri
+                ),
+            ),
+        ]
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -530,33 +567,5 @@ mod tests {
         // STIR pends an interrupt.
         nvic.write_reg(0xE00, AccessWidth::Word, 7).unwrap();
         assert!(nvic.is_pending(Irq::new(7)));
-    }
-}
-
-impl Nvic {
-    /// Labelled state for the peripheral status browser.
-    pub fn status(&self, _clocks: &crate::Clocks) -> Vec<(&'static str, String)> {
-        let active = self.active.iter().map(|word| word.count_ones()).sum::<u32>();
-        let enabled = self.enabled.iter().map(|word| word.count_ones()).sum::<u32>();
-        vec![
-            ("已使能中断", format!("{enabled}")),
-            (
-                "挂起中断",
-                format!("{}", self.pending_count()),
-            ),
-            ("活动中断", format!("{active}")),
-            (
-                "当前异常",
-                match self.current_exception() {
-                    Some(number) => format!("#{number}"),
-                    None => "无".to_string(),
-                },
-            ),
-            ("嵌套深度", format!("{}", self.nesting_depth())),
-            (
-                "PRIMASK / BASEPRI",
-                format!("{} / 0x{:02X}", if self.primask { 1 } else { 0 }, self.basepri),
-            ),
-        ]
     }
 }

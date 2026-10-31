@@ -375,6 +375,22 @@ impl Adc {
 
 crate::impl_peripheral!(Adc, "ADC");
 
+impl Adc {
+    /// Labelled state for the peripheral status browser.
+    pub fn status(&self, _clocks: &gsim_core::Clocks) -> Vec<(&'static str, String)> {
+        vec![
+            ("使能", crate::status::on_off(self.enabled).to_string()),
+            (
+                "转换",
+                if self.active { "进行中" } else { "空闲" }.to_string(),
+            ),
+            ("数据寄存器", format!("{}", self.dr)),
+            ("状态 SR", crate::status::hex(self.sr)),
+            ("控制 CR2", crate::status::hex(self.cr2)),
+        ]
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -498,21 +514,5 @@ mod tests {
             adc.read_reg(&cx, reg::SR, AccessWidth::Word).unwrap() & sr::EOC,
             0
         );
-    }
-}
-
-impl Adc {
-    /// Labelled state for the peripheral status browser.
-    pub fn status(&self, _clocks: &gsim_core::Clocks) -> Vec<(&'static str, String)> {
-        vec![
-            ("使能", crate::status::on_off(self.enabled).to_string()),
-            (
-                "转换",
-                if self.active { "进行中" } else { "空闲" }.to_string(),
-            ),
-            ("数据寄存器", format!("{}", self.dr)),
-            ("状态 SR", crate::status::hex(self.sr)),
-            ("控制 CR2", crate::status::hex(self.cr2)),
-        ]
     }
 }

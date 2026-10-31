@@ -57,7 +57,7 @@ impl DeviceLibrary {
         egui::Window::new("器件库")
             .id(egui::Id::new("device-library"))
             .open(&mut open)
-            .default_size([600.0, 278.0])
+            .default_size([600.0, 470.0])
             .default_pos([260.0, 120.0])
             .resizable(true)
             .vscroll(false)
@@ -199,7 +199,16 @@ impl DeviceLibrary {
 
 /// Categories in the order they appear in the tab row.
 fn categories() -> Vec<&'static str> {
+    const PREFERRED: [&str; 6] = ["电源", "时钟", "指示", "交互", "通信", "显示"];
     let mut categories: Vec<&'static str> = Vec::new();
+    for category in PREFERRED {
+        if DeviceKind::ALL
+            .iter()
+            .any(|kind| kind.category() == category)
+        {
+            categories.push(category);
+        }
+    }
     for kind in DeviceKind::ALL {
         if !categories.contains(&kind.category()) {
             categories.push(kind.category());
@@ -224,25 +233,29 @@ fn thumbnail(ui: &mut egui::Ui, kind: DeviceKind) {
 
     let pins = kind.pins();
     let totals = [
-        pins.iter().filter(|def| def.side == Side::Left).count(),
-        pins.iter().filter(|def| def.side == Side::Right).count(),
+        pins.iter()
+            .filter(|def| matches!(def.side, Side::Left | Side::Top))
+            .count(),
+        pins.iter()
+            .filter(|def| matches!(def.side, Side::Right | Side::Bottom))
+            .count(),
     ];
     let mut seen = [0usize; 2];
     for def in pins.iter() {
         let column = match def.side {
-            Side::Left => 0,
-            Side::Right => 1,
+            Side::Left | Side::Top => 0,
+            Side::Right | Side::Bottom => 1,
         };
         seen[column] += 1;
         let fraction = seen[column] as f32 / (totals[column] + 1) as f32;
         let y = body.top() + body.height() * fraction;
         let tip = match def.side {
-            Side::Left => Pos2::new(body.left() - 13.0, y),
-            Side::Right => Pos2::new(body.right() + 13.0, y),
+            Side::Left | Side::Top => Pos2::new(body.left() - 13.0, y),
+            Side::Right | Side::Bottom => Pos2::new(body.right() + 13.0, y),
         };
         let base = match def.side {
-            Side::Left => Pos2::new(body.left(), y),
-            Side::Right => Pos2::new(body.right(), y),
+            Side::Left | Side::Top => Pos2::new(body.left(), y),
+            Side::Right | Side::Bottom => Pos2::new(body.right(), y),
         };
         painter.line_segment([base, tip], Stroke::new(1.4, COLOR_PIN));
         painter.circle_filled(tip, 2.0, COLOR_PIN);
@@ -256,6 +269,9 @@ fn thumbnail(ui: &mut egui::Ui, kind: DeviceKind) {
         DeviceKind::Gnd => Color32::from_rgb(120, 150, 200),
         DeviceKind::Can => Color32::from_rgb(245, 200, 60),
         DeviceKind::Matrix => Color32::from_rgb(70, 200, 255),
+        DeviceKind::HseCrystal | DeviceKind::LseCrystal => Color32::from_rgb(190, 150, 255),
+        DeviceKind::Resistor => Color32::from_rgb(210, 170, 120),
+        DeviceKind::Scope => Color32::from_rgb(120, 230, 220),
     };
     match kind {
         DeviceKind::Led => {
@@ -406,6 +422,85 @@ fn thumbnail(ui: &mut egui::Ui, kind: DeviceKind) {
                     );
                 }
             }
+        }
+        DeviceKind::HseCrystal | DeviceKind::LseCrystal => {
+            // Quartz: two plates around the body, leads to both terminals.
+            let center = body.center();
+            let plate = body.height() * 0.26;
+            let spacing = body.width() * 0.14;
+            let stroke = Stroke::new(1.4, accent);
+            painter.line_segment(
+                [
+                    Pos2::new(body.left() + 8.0, center.y),
+                    Pos2::new(center.x - spacing, center.y),
+                ],
+                stroke,
+            );
+            painter.line_segment(
+                [
+                    Pos2::new(center.x + spacing, center.y),
+                    Pos2::new(body.right() - 8.0, center.y),
+                ],
+                stroke,
+            );
+            for x in [center.x - spacing, center.x + spacing] {
+                painter.line_segment(
+                    [
+                        Pos2::new(x, center.y - plate),
+                        Pos2::new(x, center.y + plate),
+                    ],
+                    stroke,
+                );
+            }
+            painter.rect_filled(
+                Rect::from_center_size(center, Vec2::new(spacing * 0.9, plate * 1.4)),
+                2.0,
+                accent,
+            );
+        }
+        DeviceKind::Resistor => {
+            // Zig-zag between the two leads.
+            let center = body.center();
+            let half = body.width() * 0.16;
+            let amplitude = body.height() * 0.18;
+            let stroke = Stroke::new(1.3, accent);
+            painter.line_segment(
+                [
+                    Pos2::new(body.left() + 6.0, center.y),
+                    Pos2::new(center.x - half, center.y),
+                ],
+                stroke,
+            );
+            let mut points = vec![Pos2::new(center.x - half, center.y)];
+            for step in 0..6 {
+                let x = center.x - half + half * 2.0 * (step as f32 + 0.5) / 6.0;
+                let y = center.y + if step % 2 == 0 { -amplitude } else { amplitude };
+                points.push(Pos2::new(x, y));
+            }
+            points.push(Pos2::new(center.x + half, center.y));
+            painter.add(Shape::line(points, stroke));
+            painter.line_segment(
+                [
+                    Pos2::new(center.x + half, center.y),
+                    Pos2::new(body.right() - 6.0, center.y),
+                ],
+                stroke,
+            );
+        }
+        DeviceKind::Scope => {
+            // A little screen with a trace on it.
+            let screen = body.shrink(body.width() * 0.12);
+            painter.rect_filled(screen, 2.0, Color32::from_rgb(18, 26, 24));
+            let stroke = Stroke::new(1.2, accent);
+            let mut points = Vec::new();
+            for step in 0..=16 {
+                let t = step as f32 / 16.0;
+                points.push(Pos2::new(
+                    screen.left() + screen.width() * t,
+                    screen.center().y - (t * std::f32::consts::TAU).sin() * screen.height() * 0.28,
+                ));
+            }
+            painter.add(Shape::line(points, stroke));
         }
     }
 }

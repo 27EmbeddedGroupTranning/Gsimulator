@@ -21,8 +21,9 @@ fn raw_input() -> egui::RawInput {
 #[test]
 fn stimulus_toggles_pa5_and_lights_the_demo_led() {
     let mut sim = Simulation::new();
+    sim.start_stimulus();
     let board = Board::demo();
-    let led = board.devices()[0].id;
+    let led = board.first_of(DeviceKind::Led).expect("demo LED").id;
 
     let mut saw_high = false;
     let mut saw_low = false;
@@ -51,12 +52,16 @@ fn stimulus_toggles_pa5_and_lights_the_demo_led() {
 #[test]
 fn stopping_the_stimulus_releases_the_pin_but_keeps_the_clock() {
     let mut sim = Simulation::new();
+    sim.start_stimulus();
     sim.advance_frame(400_000);
-    assert!(sim.now_ns() > 0, "the stimulus must start automatically");
+    assert!(sim.now_ns() > 0, "the stimulus must drive the clock");
 
     sim.stop_stimulus();
     assert!(matches!(sim.source(), Source::Idle));
-    assert!(sim.is_running(), "stopping the driver must not pause the clock");
+    assert!(
+        sim.is_running(),
+        "stopping the driver must not pause the clock"
+    );
     assert!(!sim.pin_levels().is_output(0, 5), "PA5 must be released");
     assert!(!sim.pin_levels().level_of(0, 5), "PA5 must be driven low");
 
@@ -264,19 +269,23 @@ fn missing_elf_is_reported_instead_of_panicking() {
 }
 
 #[test]
-fn the_demo_board_drives_the_wired_encoder_contacts() {
+fn the_app_starts_with_an_empty_board_and_a_live_clock() {
     let ctx = egui::Context::default();
     let mut app = App::with_context(&ctx, None);
     for _ in 0..2 {
-        ctx.run(raw_input(), |ctx| app.draw(ctx));
+        let _ = ctx.run(raw_input(), |ctx| app.draw(ctx));
     }
     let levels = app.levels();
     assert!(
-        levels.level_of(0, 0) && levels.level_of(0, 1),
-        "the encoder contacts must be pulled high by the harness"
+        !levels.is_output(0, 5),
+        "no stimulus is configured at start-up"
     );
     assert!(
-        levels.is_output(0, 5),
-        "the stimulus drives PA5 as an output"
+        !levels.level_of(0, 0) && !levels.level_of(0, 1),
+        "the empty board has no encoder pulling contacts high"
+    );
+    assert!(
+        app.sim_time_ns() > 0,
+        "the simulation clock itself keeps running"
     );
 }

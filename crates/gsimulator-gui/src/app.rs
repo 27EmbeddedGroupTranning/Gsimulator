@@ -12,6 +12,7 @@ use crate::canbus::{CanAction, CanBusWindow};
 use crate::canvas::Schematic;
 use crate::library::DeviceLibrary;
 use crate::peripherals::PeripheralBrowser;
+use crate::scope::{ScopeAction, ScopeWindow};
 use crate::sim::{Simulation, Snapshot, Source};
 use crate::stimulus::{StimulusAction, StimulusWindow};
 use gsim_devices::Direction;
@@ -42,6 +43,8 @@ pub struct App {
     peripherals: PeripheralBrowser,
     /// Dedicated window for the CAN transceiver and the bus it sits on.
     can_bus: CanBusWindow,
+    /// Window showing the traces of the probes on the drawing.
+    scope: ScopeWindow,
     /// Window with the pin/waveform settings of the built-in stimulus.
     stimulus: StimulusWindow,
     /// Window listing every part that can be placed on the canvas.
@@ -62,14 +65,17 @@ impl App {
         install_fonts(ctx);
         ctx.set_visuals(egui::Visuals::dark());
 
+        // The canvas starts empty: parts (including the crystals) are placed
+        // from the library, the "示例电路" button restores a demo wiring.
+        let board = Board::new();
         let mut sim = Simulation::new();
+        sim.set_crystals(board.crystals());
         if let Some(path) = elf_path {
             if let Err(error) = sim.load_elf(&path) {
                 eprintln!("{error}");
             }
         }
         let levels = sim.pin_levels();
-        let board = Board::demo();
         let board_state = board.evaluate(&levels);
         let mut snapshot = sim.snapshot();
         board.fill_snapshot(&mut snapshot);
@@ -90,6 +96,7 @@ impl App {
             show_status: true,
             peripherals: PeripheralBrowser::new(),
             can_bus: CanBusWindow::default(),
+            scope: ScopeWindow::default(),
             stimulus,
             library: DeviceLibrary::new(),
             uart_input: std::collections::BTreeMap::new(),
@@ -121,14 +128,9 @@ impl App {
     fn toolbar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal_wrapped(|ui| {
             let running = self.snapshot.running;
-            let idle = matches!(self.sim.source(), Source::Idle);
             if ui
                 .button(if running { "⏸ 暂停" } else { "▶ 运行" })
-                .on_hover_text(if idle {
-                    "没有引脚驱动源：运行只推进仿真时钟，外设与总线照常工作"
-                } else {
-                    "空格键也可以切换"
-                })
+                .on_hover_text("空格键也可以切换")
                 .clicked()
             {
                 self.sim.toggle_running();
@@ -184,8 +186,9 @@ impl App {
             }
             if ui.button("示例电路").clicked() {
                 self.board = Board::demo();
+                self.schematic.fit(self.schematic.last_rect, &self.board);
                 self.schematic.say(
-                    "已恢复示例电路（LED/PA5、UART1/PA9+PA10、编码器/PA0-PA2）",
+                    "已恢复示例电路（LED/PA5、UART1/PA9+PA10、编码器/PA0-PA2、HSE/LSE 晶振）",
                     false,
                 );
             }
@@ -200,6 +203,13 @@ impl App {
                 .clicked()
             {
                 self.peripherals.toggle();
+            }
+            if ui
+                .selectable_label(self.scope.open, "📈 示波器")
+                .on_hover_text("查看探头抓到的 CANH/CANL 波形")
+                .clicked()
+            {
+                self.scope.toggle();
             }
             if ui
                 .selectable_label(self.can_bus.open, "🚌 CAN 总线")
@@ -224,15 +234,18 @@ impl App {
             .id_salt("status-panel")
             .show(ui, |ui| {
                 ui.heading("仿真状态");
-                ui.label(
-                    RichText::new(snapshot.source_label.as_str())
-                        .color(if snapshot.running {
-                            Color32::from_rgb(120, 220, 140)
-                        } else {
-                            Color32::from_rgb(220, 180, 90)
-                        })
-                        .strong(),
-                );
+                // An idle simulator has no "source" line at all.
+                if !matches!(snapshot.source, Source::Idle) {
+                    ui.label(
+                        RichText::new(snapshot.source_label.as_str())
+                            .color(if snapshot.running {
+                                Color32::from_rgb(120, 220, 140)
+                            } else {
+                                Color32::from_rgb(220, 180, 90)
+                            })
+                            .strong(),
+                    );
+                }
                 if let Some(halt) = &snapshot.halt {
                     ui.colored_label(Color32::from_rgb(240, 120, 120), halt);
                 }
@@ -344,7 +357,7 @@ impl App {
                 ui.label(
                     RichText::new(
                         "提示：＋ 添加器件 打开器件库（也可把卡片拖到画布）；点击引脚 → 点击另一个引脚 完成连线；\
-                     Delete 删除选中；中键拖动平移；滚轮缩放。",
+                     拖动线段 / 双击连线 加拐点；Delete 删除选中；中键拖动平移；滚轮缩放。",
                     )
                     .color(Color32::GRAY)
                     .small(),
@@ -357,6 +370,8 @@ impl App {
             let pins: Vec<u8> = match port {
                 0 | 1 => (0..16).collect(),
                 2 => vec![13, 14, 15],
+                // OSC_IN / OSC_OUT of the HSE crystal.
+                3 => vec![0, 1],
                 _ => Vec::new(),
             };
             if pins.is_empty() {
@@ -415,9 +430,7 @@ impl App {
                     continue;
                 };
                 if ui
-                    .add(
-                        egui::Button::new(RichText::new(kind.label()).small()).fill(color),
-                    )
+                    .add(egui::Button::new(RichText::new(kind.label()).small()).fill(color))
                     .on_hover_text("从这个电源符号开始连线")
                     .clicked()
                 {
@@ -442,7 +455,7 @@ impl App {
         ui.heading("虚拟外设");
         if self.board.devices().is_empty() {
             ui.label(
-                RichText::new("还没有外设，点工具栏的“＋ LED / ＋ UART / ＋ 编码器”添加")
+                RichText::new("还没有外设，点工具栏的「＋ 添加器件」从器件库放置")
                     .color(Color32::GRAY),
             );
             return;
@@ -526,8 +539,7 @@ impl App {
                             })
                             .unwrap_or(("正常", 0));
                         ui.label(
-                            RichText::new(format!("{mode} · 已发 {frames}"))
-                                .color(Color32::GRAY),
+                            RichText::new(format!("{mode} · 已发 {frames}")).color(Color32::GRAY),
                         );
                     }
                     DeviceKind::Matrix => {
@@ -538,6 +550,40 @@ impl App {
                             .map(|matrix| matrix.borrow().words())
                             .unwrap_or(0);
                         ui.label(RichText::new(format!("已锁存 {words} 字")).color(Color32::GRAY));
+                    }
+                    DeviceKind::HseCrystal | DeviceKind::LseCrystal => {
+                        let crystals = self.board.crystals();
+                        let (wired, running) = match kind {
+                            DeviceKind::HseCrystal => {
+                                (crystals.hse_hz.is_some(), self.sim.hse_ready())
+                            }
+                            _ => (crystals.lse, self.sim.lse_ready()),
+                        };
+                        let frequency = device
+                            .hardware
+                            .crystal()
+                            .map(|crystal| crystal.frequency_label())
+                            .unwrap_or_default();
+                        ui.label(RichText::new(format!("● {name}")).color(accent));
+                        let text = if running {
+                            format!("{frequency} · 起振中")
+                        } else if wired {
+                            format!("{frequency} · 已接到振荡脚")
+                        } else {
+                            format!("{frequency} · 未接到振荡脚")
+                        };
+                        ui.label(RichText::new(text).color(Color32::GRAY));
+                    }
+                    DeviceKind::Resistor | DeviceKind::Scope => {
+                        ui.label(RichText::new(format!("● {name}")).color(accent));
+                        ui.label(
+                            RichText::new(if kind == DeviceKind::Resistor {
+                                "无源"
+                            } else {
+                                "仪器"
+                            })
+                            .color(Color32::GRAY),
+                        );
                     }
                 }
                 if ui.small_button("🗑").clicked() {
@@ -566,7 +612,11 @@ impl App {
                 | DeviceKind::Vcc
                 | DeviceKind::Gnd
                 | DeviceKind::Can
-                | DeviceKind::Matrix => {}
+                | DeviceKind::Matrix
+                | DeviceKind::Resistor
+                | DeviceKind::Scope
+                | DeviceKind::HseCrystal
+                | DeviceKind::LseCrystal => {}
             }
         }
         if let Some(id) = remove {
@@ -755,13 +805,27 @@ impl App {
         match action {
             CanAction::Inject(frame) => {
                 let now = self.sim.now_ns();
-                self.board.can_bus().borrow_mut().inject(frame, now);
+                // The frame really travels on the wire, bit by bit, so it
+                // arbitrates against the controller instead of being pasted
+                // into its FIFO.
+                self.board
+                    .can_bus()
+                    .borrow_mut()
+                    .inject_bit_frame(frame, now);
                 self.schematic.say(
-                    format!("已向总线注入 {} {}", frame.id_label(), frame.data_label()),
+                    format!(
+                        "外部节点开始发送 {} {}",
+                        frame.id_label(),
+                        frame.data_label()
+                    ),
                     false,
                 );
             }
             CanAction::ClearLog => self.board.can_bus().borrow_mut().clear_records(),
+            CanAction::OpenScope => {
+                self.scope.open = true;
+                self.refresh_snapshot();
+            }
             CanAction::SetMode(mode) => {
                 let mut changed = false;
                 for transceiver in self.board.transceivers() {
@@ -774,6 +838,29 @@ impl App {
                 } else {
                     self.schematic
                         .say("画布上还没有 CAN 收发器，先从器件库放置一个", true);
+                }
+            }
+        }
+        self.refresh_snapshot();
+    }
+
+    /// Applies a command issued from the oscilloscope window.
+    fn apply_scope_action(&mut self, action: ScopeAction) {
+        let scopes = self.board.scopes();
+        match action {
+            ScopeAction::SetWindow(index, window_ns) => {
+                if let Some(scope) = scopes.get(index) {
+                    scope.borrow_mut().set_window_ns(window_ns);
+                }
+            }
+            ScopeAction::SetFrozen(index, frozen) => {
+                if let Some(scope) = scopes.get(index) {
+                    scope.borrow_mut().set_frozen(frozen);
+                }
+            }
+            ScopeAction::Clear(index) => {
+                if let Some(scope) = scopes.get(index) {
+                    scope.borrow_mut().clear();
                 }
             }
         }
@@ -859,6 +946,9 @@ impl App {
     /// so the whole UI can be rendered from a test.
     pub fn draw(&mut self, ctx: &egui::Context) {
         self.handle_shortcuts(ctx);
+        // Soldering or removing a crystal takes effect immediately; the RCC
+        // decides what to do with it, not the front end.
+        self.sim.set_crystals(self.board.crystals());
         if self.snapshot.running {
             // Service the parts first, then let the core run a millisecond at a
             // time, so encoder edges and terminal bytes land between
@@ -931,6 +1021,9 @@ impl App {
         self.peripherals.show(ctx, &self.snapshot);
         if let Some(action) = self.can_bus.show(ctx, &self.snapshot) {
             self.apply_can_action(action);
+        }
+        if let Some(action) = self.scope.show(ctx, &self.snapshot) {
+            self.apply_scope_action(action);
         }
         if let Some(action) = self.stimulus.show(ctx, &self.snapshot) {
             self.apply_stimulus_action(action);

@@ -307,6 +307,65 @@ impl Spi {
 
 crate::impl_peripheral!(Spi, "SPI");
 
+impl Spi {
+    /// Labelled state for the peripheral status browser.
+    pub fn status(&self, clocks: &gsim_core::Clocks) -> Vec<(&'static str, String)> {
+        let pclk = if self.index == 0 {
+            clocks.pclk2_hz
+        } else {
+            clocks.pclk1_hz
+        };
+        let mut flags = Vec::new();
+        if self.tx_buffer.is_none() {
+            flags.push("TXE");
+        }
+        if self.rx.is_some() {
+            flags.push("RXNE");
+        }
+        if self.shift.is_some() {
+            flags.push("BSY");
+        }
+        if self.overrun {
+            flags.push("OVR");
+        }
+        vec![
+            (
+                "使能",
+                crate::status::on_off(self.cr1 & cr1::SPE != 0).to_string(),
+            ),
+            (
+                "模式",
+                if self.cr1 & cr1::MSTR != 0 {
+                    "主机"
+                } else {
+                    "从机"
+                }
+                .to_string(),
+            ),
+            ("SCK", crate::status::hz(self.sck_hz(pclk))),
+            (
+                "帧宽",
+                if self.cr1 & cr1::DFF != 0 {
+                    "16 位"
+                } else {
+                    "8 位"
+                }
+                .to_string(),
+            ),
+            (
+                "标志",
+                if flags.is_empty() {
+                    "无".to_string()
+                } else {
+                    flags.join(" ")
+                },
+            ),
+            ("CR1", crate::status::hex(self.cr1)),
+            ("CR2", crate::status::hex(self.cr2)),
+        ]
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -409,44 +468,5 @@ mod tests {
             spi.read_reg(&cx, reg::SR, AccessWidth::Word).unwrap() & sr::RXNE,
             0
         );
-    }
-}
-
-impl Spi {
-    /// Labelled state for the peripheral status browser.
-    pub fn status(&self, clocks: &gsim_core::Clocks) -> Vec<(&'static str, String)> {
-        let pclk = if self.index == 0 {
-            clocks.pclk2_hz
-        } else {
-            clocks.pclk1_hz
-        };
-        let mut flags = Vec::new();
-        if self.tx_buffer.is_none() {
-            flags.push("TXE");
-        }
-        if self.rx.is_some() {
-            flags.push("RXNE");
-        }
-        if self.shift.is_some() {
-            flags.push("BSY");
-        }
-        if self.overrun {
-            flags.push("OVR");
-        }
-        vec![
-            ("使能", crate::status::on_off(self.cr1 & cr1::SPE != 0).to_string()),
-            (
-                "模式",
-                if self.cr1 & cr1::MSTR != 0 { "主机" } else { "从机" }.to_string(),
-            ),
-            ("SCK", crate::status::hz(self.sck_hz(pclk))),
-            (
-                "帧宽",
-                if self.cr1 & cr1::DFF != 0 { "16 位" } else { "8 位" }.to_string(),
-            ),
-            ("标志", if flags.is_empty() { "无".to_string() } else { flags.join(" ") }),
-            ("CR1", crate::status::hex(self.cr1)),
-            ("CR2", crate::status::hex(self.cr2)),
-        ]
     }
 }

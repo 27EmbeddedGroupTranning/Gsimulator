@@ -8,10 +8,10 @@
 crates/
   gsim-core/      与芯片无关的基础设施：MemoryBus/AccessWidth/BusError、Ctx+Event、Irq、Nvic/Scb/SysTick、纳秒↔周期
   gsim-stm32f1/   STM32F103 片上外设（Soc + rcc/gpio/afio/exti/usart/spi/i2c/tim/adc/dma/flash/pwr/rtc/watchdog/crc/can/bitband）
-  gsim-devices/   片外器件模型（uart 终端、encoder 旋转编码器、max7219、can_bus）——只依赖 gsim-core
+  gsim-devices/   片外器件模型（uart 终端、encoder 旋转编码器、max7219、can_bus、crystal 晶振）——只依赖 gsim-core
   gsim-cpu/       Cortex-M3 执行前端（armagnac）+ ELF 装载 + Soc 桥接
   gsim-gdb/       虚拟 ST-Link：GDB 远程协议服务器（rsp 帧 / target.xml / flash 编程 / 断点）
-  gsimulator-cli/ 命令行：run / gdb / demo / info
+  gsimulator-cli/ 命令行：run / gdb / flash / demo / info
   gsimulator-gui/ 图形前端：原理图画布 + 虚拟外设（board / canvas / bridge / sim / app）
 ```
 

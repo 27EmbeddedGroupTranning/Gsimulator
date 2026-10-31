@@ -25,4 +25,4 @@ pub mod server;
 pub mod target;
 
 pub use server::{GdbServer, ServerOptions};
-pub use target::{PointKind, Signal, Stop, Target};
+pub use target::{FlashReport, PointKind, Signal, Stop, Target};

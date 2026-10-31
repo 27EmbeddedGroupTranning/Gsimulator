@@ -158,6 +158,29 @@ impl Afio {
 
 crate::impl_peripheral!(Afio, "AFIO");
 
+impl Afio {
+    /// Labelled state for the peripheral status browser.
+    pub fn status(&self, _clocks: &gsim_core::Clocks) -> Vec<(&'static str, String)> {
+        vec![
+            ("MAPR", crate::status::hex(self.mapr)),
+            (
+                "SPI1 重映射",
+                if self.spi1_remapped() { "是" } else { "否" }.to_string(),
+            ),
+            (
+                "I2C1 重映射",
+                if self.i2c1_remapped() { "是" } else { "否" }.to_string(),
+            ),
+            (
+                "USART1 重映射",
+                if self.usart1_remapped() { "是" } else { "否" }.to_string(),
+            ),
+            ("SWJ_CFG", format!("0b{:03b}", self.swj_cfg)),
+            ("EVCR", crate::status::hex(self.evcr)),
+        ]
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -202,19 +225,5 @@ mod tests {
         afio.write_reg(&cx, reg::MAPR, AccessWidth::Word, 0)
             .unwrap();
         assert_eq!(afio.swj_cfg(), 0);
-    }
-}
-
-impl Afio {
-    /// Labelled state for the peripheral status browser.
-    pub fn status(&self, _clocks: &gsim_core::Clocks) -> Vec<(&'static str, String)> {
-        vec![
-            ("MAPR", crate::status::hex(self.mapr)),
-            ("SPI1 重映射", if self.spi1_remapped() { "是" } else { "否" }.to_string()),
-            ("I2C1 重映射", if self.i2c1_remapped() { "是" } else { "否" }.to_string()),
-            ("USART1 重映射", if self.usart1_remapped() { "是" } else { "否" }.to_string()),
-            ("SWJ_CFG", format!("0b{:03b}", self.swj_cfg)),
-            ("EVCR", crate::status::hex(self.evcr)),
-        ]
     }
 }

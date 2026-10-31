@@ -449,7 +449,11 @@ fn can_and_led_matrix(soc: &Rc<RefCell<Soc>>) -> Result<(), String> {
 
     // 200 kbit/s: PCLK1 36 MHz / 36 = 1 us per tq, 5 tq per bit.
     write32(soc, can + map::can::MCR, 1);
-    write32(soc, can + map::can::BTR, (2 - 1) << 16 | (2 - 1) << 20 | 35 | (1 << 30));
+    write32(
+        soc,
+        can + map::can::BTR,
+        (2 - 1) << 16 | (2 - 1) << 20 | 35 | (1 << 30),
+    );
     // One 32 bit mask filter for the standard identifier 0x123, into FIFO0.
     write32(soc, can + map::can::FMR, 1);
     write32(soc, can + map::can::FS1R, 1);
@@ -468,7 +472,11 @@ fn can_and_led_matrix(soc: &Rc<RefCell<Soc>>) -> Result<(), String> {
         high |= u32::from(*payload.get(index + 4).unwrap_or(&0)) << (index * 8);
     }
     write32(soc, can + map::can::TX_BASE, 0x123 << 21);
-    write32(soc, can + map::can::TX_BASE + map::can::TDTR, payload.len() as u32);
+    write32(
+        soc,
+        can + map::can::TX_BASE + map::can::TDTR,
+        payload.len() as u32,
+    );
     write32(soc, can + map::can::TX_BASE + map::can::TDHR, high);
     write32(soc, can + map::can::TX_BASE + map::can::TDLR, low);
     write32(soc, can + map::can::TX_BASE, (0x123 << 21) | 1);
@@ -510,16 +518,28 @@ fn can_and_led_matrix(soc: &Rc<RefCell<Soc>>) -> Result<(), String> {
     );
 
     println!();
+    println!("== CAN 物理层：真实线与仲裁 + 终端电阻 ==");
+    can_wire_physics(soc, can);
+
+    println!();
     println!("== MAX7219 8x8 点阵（SPI1: PA5/PA7，PA4 = LOAD）==");
     let gpioa = map::gpio::PORTS[0];
     let apb2enr = read32(soc, map::rcc::BASE + map::rcc::APB2ENR);
-    write32(soc, map::rcc::BASE + map::rcc::APB2ENR, apb2enr | (1 << 2) | (1 << 12));
+    write32(
+        soc,
+        map::rcc::BASE + map::rcc::APB2ENR,
+        apb2enr | (1 << 2) | (1 << 12),
+    );
     let crl = read32(soc, gpioa + map::gpio::CRL);
     let crl = (crl & !0x000F_0000) | (0b0010 << 16);
     let crl = (crl & !((0xF << 20) | (0xF << 28))) | (0b1011 << 20) | (0b1011 << 28);
     write32(soc, gpioa + map::gpio::CRL, crl);
     write32(soc, gpioa + map::gpio::BSRR, 1 << 4);
-    write32(soc, map::spi::BASE_1 + map::spi::CR1, (1 << 2) | (0b010 << 3) | (1 << 6));
+    write32(
+        soc,
+        map::spi::BASE_1 + map::spi::CR1,
+        (1 << 2) | (0b010 << 3) | (1 << 6),
+    );
 
     let icon: [u8; 8] = [0x3C, 0x42, 0xA5, 0x81, 0xA5, 0x99, 0x42, 0x3C];
     for (register, value) in [
@@ -551,6 +571,111 @@ fn can_and_led_matrix(soc: &Rc<RefCell<Soc>>) -> Result<(), String> {
         device.miso()
     );
     Ok(())
+}
+
+/// Runs the wire bit by bit for `bits` bit times, as the GUI bridge does.
+fn run_wire(soc: &Rc<RefCell<Soc>>, bus: &Rc<RefCell<CanBus>>, bits: u32) {
+    for _ in 0..bits {
+        let bit_ns = soc.borrow().can_bit_time_ns(0).max(1);
+        let now = soc.borrow().now_ns();
+        let controller = soc.borrow().can_driven_level(0);
+        let level = bus.borrow_mut().step(controller, now);
+        soc.borrow_mut().can_sample_bit(0, level);
+        soc.borrow_mut().advance_ns(bit_ns);
+    }
+}
+
+/// Arms transmit mailbox 0 with a standard data frame.
+fn request_standard(soc: &Rc<RefCell<Soc>>, can: u32, id: u32, payload: &[u8]) {
+    let mut low = 0u32;
+    let mut high = 0u32;
+    for index in 0..4 {
+        low |= u32::from(*payload.get(index).unwrap_or(&0)) << (index * 8);
+        high |= u32::from(*payload.get(index + 4).unwrap_or(&0)) << (index * 8);
+    }
+    write32(soc, can + map::can::TX_BASE, id << 21);
+    write32(
+        soc,
+        can + map::can::TX_BASE + map::can::TDTR,
+        payload.len() as u32,
+    );
+    write32(soc, can + map::can::TX_BASE + map::can::TDHR, high);
+    write32(soc, can + map::can::TX_BASE + map::can::TDLR, low);
+    write32(soc, can + map::can::TX_BASE, (id << 21) | 1);
+}
+
+/// Walks the bit level wire: a rival node, real arbitration and what a missing
+/// termination resistor does to the frames.
+fn can_wire_physics(soc: &Rc<RefCell<Soc>>, can: u32) {
+    let wire = Rc::new(RefCell::new(CanBus::new()));
+    // Leaves loopback mode: from now on the controller follows the wire.
+    write32(soc, can + map::can::MCR, 1);
+    write32(soc, can + map::can::BTR, (2 - 1) << 16 | (2 - 1) << 20 | 35);
+    write32(soc, can + map::can::MCR, 0);
+    soc.borrow_mut().can_set_on_bus(0, true);
+    wire.borrow_mut()
+        .set_bit_time(soc.borrow().can_bit_time_ns(0));
+    // Two 120 Ω parts, one at each end of the pair.
+    wire.borrow_mut().set_termination(Some(60.0));
+    let rival = wire.borrow_mut().add_peer("对手节点");
+
+    // Both nodes ask for the wire on the same bit; the identifier decides.
+    wire.borrow_mut()
+        .queue_frame(rival, CanFrame::standard(0x100, b"win"));
+    request_standard(soc, can, 0x321, b"mine");
+    run_wire(soc, &wire, 240);
+
+    let stats = soc.borrow().can.stats();
+    println!(
+        "  0x321 与 0x100 同时起跑：仲裁失败 {} 次，位错误 {} 次，最终发出 {} 帧",
+        stats.arbitration_lost, stats.tx_errors, stats.tx_frames
+    );
+
+    println!(
+        "  收发记录：{}",
+        wire.borrow()
+            .records()
+            .iter()
+            .map(|record| format!(
+                "{} {} {}",
+                record.node_name,
+                if record.direction == gsim_core::CanDirection::Tx {
+                    "发送"
+                } else {
+                    "接收"
+                },
+                record.frame.id_label()
+            ))
+            .collect::<Vec<_>>()
+            .join("，")
+    );
+
+    for (label, ohms) in [
+        ("两个 120 Ω（并联 60 Ω）", Some(60.0)),
+        ("只留一个 120 Ω", Some(120.0)),
+        ("完全没有终端电阻", None),
+    ] {
+        wire.borrow_mut().set_termination(ohms);
+        let before = soc.borrow().can.stats().rx_frames;
+        let errors = wire.borrow().stats().error_frames;
+        for _ in 0..6 {
+            let now = soc.borrow().now_ns();
+            wire.borrow_mut()
+                .inject_bit_frame(CanFrame::standard(0x123, b"GSIM"), now);
+            run_wire(soc, &wire, 150);
+        }
+        let bus = wire.borrow();
+        println!(
+            "  {label}：质量 {:.0}%，位错误率 {:.3}%/位，位 {}，尖峰 {}，错误帧 {}，控制器收到 {} 帧",
+            bus.quality() * 100.0,
+            bus.error_rate() * 100.0,
+            bus.stats().bits,
+            bus.glitches(),
+            bus.stats().error_frames - errors,
+            soc.borrow().can.stats().rx_frames - before
+        );
+    }
+    soc.borrow_mut().can_set_on_bus(0, false);
 }
 
 /// Shifts one 16 bit command into the matrix (two SPI bytes, LOAD around them).

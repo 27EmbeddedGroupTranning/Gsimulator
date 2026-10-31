@@ -10,6 +10,8 @@ pub mod canbus;
 pub mod canvas;
 pub mod library;
 pub mod peripherals;
+pub mod route;
+pub mod scope;
 pub mod sim;
 pub mod stimulus;
 pub mod waveform;

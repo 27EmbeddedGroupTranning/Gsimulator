@@ -34,7 +34,11 @@ fn configured(soc: &mut Soc) {
     let crl = (crl & !((0xF << 20) | (0xF << 28))) | (0b1011 << 20) | (0b1011 << 28);
     write(soc, GPIOA + map::gpio::CRL, crl);
     // MSTR, BR = /8, SPE.
-    write(soc, SPI1 + map::spi::CR1, (1 << 2) | (0b010 << 3) | (1 << 6));
+    write(
+        soc,
+        SPI1 + map::spi::CR1,
+        (1 << 2) | (0b010 << 3) | (1 << 6),
+    );
     // `LOAD` idles high, exactly like `MAX7219_Init()` leaves it.
     write(soc, GPIOA + map::gpio::BSRR, 1 << 4);
 }

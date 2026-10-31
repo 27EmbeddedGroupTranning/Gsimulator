@@ -140,6 +140,10 @@ pub struct Rcc {
     pll_ready: bool,
     lsi_ready: bool,
     lse_ready: bool,
+    /// Crystal fitted on `OSC_IN`/`OSC_OUT`; without it `HSEON` never settles.
+    hse_present: bool,
+    /// Crystal fitted on `OSC32_IN`/`OSC32_OUT`; without it `LSEON` never settles.
+    lse_present: bool,
     pending: Vec<(Startup, u64)>,
     hse_hz: u32,
     irq_high: bool,
@@ -173,6 +177,10 @@ impl Rcc {
             pll_ready: false,
             lsi_ready: false,
             lse_ready: false,
+            // The model has always shipped with a crystal; the board can take
+            // it away to simulate a bare chip.
+            hse_present: true,
+            lse_present: true,
             pending: Vec::new(),
             hse_hz: DEFAULT_HSE_HZ,
             irq_high: false,
@@ -182,10 +190,17 @@ impl Rcc {
     }
 
     /// Restores the power-on state, including the `PORRSTF` flag.
+    ///
+    /// The board does not change when the chip resets, so the crystal
+    /// configuration survives.
     pub fn reset(&mut self) {
         let hse_hz = self.hse_hz;
+        let hse_present = self.hse_present;
+        let lse_present = self.lse_present;
         *self = Rcc::new();
         self.hse_hz = hse_hz;
+        self.hse_present = hse_present;
+        self.lse_present = lse_present;
     }
 
     /// Configures the crystal attached to OSC_IN/OSC_OUT.
@@ -195,6 +210,45 @@ impl Rcc {
 
     pub fn hse_hz(&self) -> u32 {
         self.hse_hz
+    }
+
+    /// Sets whether an HSE crystal is fitted on `OSC_IN`/`OSC_OUT`.
+    ///
+    /// Removing it stops the oscillator immediately: `HSERDY` drops, a pending
+    /// start-up is cancelled and a PLL clocked from HSE loses lock.
+    pub fn set_hse_present(&mut self, present: bool) {
+        if self.hse_present == present {
+            return;
+        }
+        self.hse_present = present;
+        if !present {
+            self.hse_ready = false;
+            self.pending.retain(|(what, _)| *what != Startup::Hse);
+            if self.cr_source_is_hse() {
+                self.pll_ready = false;
+                self.pending.retain(|(what, _)| *what != Startup::Pll);
+            }
+        }
+    }
+
+    pub fn hse_present(&self) -> bool {
+        self.hse_present
+    }
+
+    /// Sets whether a 32.768 kHz crystal is fitted on `OSC32_IN`/`OSC32_OUT`.
+    pub fn set_lse_present(&mut self, present: bool) {
+        if self.lse_present == present {
+            return;
+        }
+        self.lse_present = present;
+        if !present {
+            self.lse_ready = false;
+            self.pending.retain(|(what, _)| *what != Startup::Lse);
+        }
+    }
+
+    pub fn lse_present(&self) -> bool {
+        self.lse_present
     }
 
     fn schedule(&mut self, what: Startup, cx: &Ctx, delay_ns: u64) {
@@ -226,6 +280,18 @@ impl Rcc {
                 self.lse_ready = true;
                 self.cir |= cir::LSERDYF;
             }
+        }
+    }
+
+    /// Starts a start-up that was waiting for its crystal to appear.
+    fn ensure_oscillators(&mut self, cx: &Ctx) {
+        let hse_pending = self.pending.iter().any(|(item, _)| *item == Startup::Hse);
+        let lse_pending = self.pending.iter().any(|(item, _)| *item == Startup::Lse);
+        if self.hse_present && self.cr & cr::HSEON != 0 && !self.hse_ready && !hse_pending {
+            self.schedule(Startup::Hse, cx, HSE_STARTUP_NS);
+        }
+        if self.lse_present && self.bdcr & bdcr::LSEON != 0 && !self.lse_ready && !lse_pending {
+            self.schedule(Startup::Lse, cx, LSE_STARTUP_NS);
         }
     }
 
@@ -417,6 +483,10 @@ impl Rcc {
         self.pll_ready
     }
 
+    pub fn lse_ready(&self) -> bool {
+        self.lse_ready
+    }
+
     pub fn system_clock_source(&self) -> u32 {
         self.sws
     }
@@ -459,6 +529,9 @@ impl Rcc {
     }
 
     pub fn advance(&mut self, cx: &Ctx, _elapsed_ns: u64) {
+        // A crystal fitted (or removed) while the oscillator was already
+        // enabled changes whether the start-up runs at all.
+        self.ensure_oscillators(cx);
         let now = cx.now_ns();
         let mut fired = Vec::new();
         self.pending.retain(|(what, at)| {
@@ -501,7 +574,7 @@ impl Rcc {
         if self.cr & cr::HSION == 0 {
             self.hsi_ready = false;
         }
-        if self.cr & cr::HSEON != 0 && !self.hse_ready && old & cr::HSEON == 0 {
+        if self.cr & cr::HSEON != 0 && self.hse_present && !self.hse_ready && old & cr::HSEON == 0 {
             self.schedule(Startup::Hse, cx, HSE_STARTUP_NS);
         }
         if self.cr & cr::HSEON == 0 {
@@ -622,7 +695,11 @@ impl Rcc {
             }
             reg::BDCR => {
                 let merged = merge(self.bdcr, offset, width, value);
-                if merged & bdcr::LSEON != 0 && !self.lse_ready && self.bdcr & bdcr::LSEON == 0 {
+                if merged & bdcr::LSEON != 0
+                    && self.lse_present
+                    && !self.lse_ready
+                    && self.bdcr & bdcr::LSEON == 0
+                {
                     self.schedule(Startup::Lse, cx, LSE_STARTUP_NS);
                 }
                 if merged & bdcr::LSEON == 0 {
@@ -664,6 +741,60 @@ impl Rcc {
 }
 
 crate::impl_peripheral!(Rcc, "RCC");
+
+impl Rcc {
+    /// Labelled state for the peripheral status browser.
+    pub fn status(&self) -> Vec<(&'static str, String)> {
+        let clocks = self.clocks();
+        let source = match field(self.cfgr, 2, 2) {
+            0 => "HSI",
+            1 => "HSE",
+            2 => "PLL",
+            _ => "保留",
+        };
+        vec![
+            ("时钟源", source.to_string()),
+            (
+                "HSE 晶振",
+                if self.hse_present {
+                    format!(
+                        "{} · {}",
+                        crate::status::hz(self.hse_hz),
+                        if self.hse_ready {
+                            "稳定"
+                        } else {
+                            "未起振"
+                        }
+                    )
+                } else {
+                    "未接晶振".to_string()
+                },
+            ),
+            (
+                "LSE 晶振",
+                if self.lse_present {
+                    if self.lse_ready {
+                        "32.768 kHz · 稳定".to_string()
+                    } else {
+                        "32.768 kHz · 未起振".to_string()
+                    }
+                } else {
+                    "未接晶振".to_string()
+                },
+            ),
+            ("SYSCLK", crate::status::hz(clocks.sysclk_hz)),
+            ("HCLK", crate::status::hz(clocks.hclk_hz)),
+            ("PCLK1", crate::status::hz(clocks.pclk1_hz)),
+            ("PCLK2", crate::status::hz(clocks.pclk2_hz)),
+            ("ADC 时钟", crate::status::hz(clocks.adc_hz)),
+            ("CR", crate::status::hex(self.cr)),
+            ("CFGR", crate::status::hex(self.cfgr)),
+            ("APB1ENR", crate::status::hex(self.apb1enr)),
+            ("APB2ENR", crate::status::hex(self.apb2enr)),
+            ("CSR", crate::status::hex(self.csr)),
+        ]
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -743,6 +874,81 @@ mod tests {
     }
 
     #[test]
+    fn hse_never_settles_without_a_crystal() {
+        let mut rcc = Rcc::new();
+        rcc.set_hse_present(false);
+        let at = |ns: u64| Ctx::new(ns, Clocks::HSI_8MHZ);
+
+        write(&mut rcc, &at(0), reg::CR, cr::HSION | cr::HSEON);
+        rcc.advance(&at(5_000_000), 0);
+        assert!(!rcc.hse_ready(), "a bare chip must not report HSERDY");
+        assert_eq!(read(&mut rcc, &at(5_000_000), reg::CR) & cr::HSERDY, 0);
+
+        // Fitting the crystal later lets the pending start-up run.
+        rcc.set_hse_present(true);
+        rcc.advance(&at(8_000_000), 0);
+        assert!(!rcc.hse_ready(), "start-up still takes its time");
+        rcc.advance(&at(12_000_000), 0);
+        assert!(rcc.hse_ready());
+        assert_eq!(
+            read(&mut rcc, &at(12_000_000), reg::CR) & cr::HSERDY,
+            cr::HSERDY
+        );
+    }
+
+    #[test]
+    fn removing_the_hse_crystal_drops_ready_and_pll_lock() {
+        let mut rcc = Rcc::new();
+        let at = |ns: u64| Ctx::new(ns, Clocks::HSI_8MHZ);
+
+        write(&mut rcc, &at(0), reg::CR, cr::HSION | cr::HSEON);
+        rcc.advance(&at(3_000_000), 0);
+        assert!(rcc.hse_ready());
+
+        write(
+            &mut rcc,
+            &at(3_000_000),
+            reg::CFGR,
+            (1 << 16) | (0b1000 << 18) | sw::PLL,
+        );
+        write(&mut rcc, &at(3_000_000), reg::CR, cr::HSEON | cr::PLLON);
+        rcc.advance(&at(4_000_000), 0);
+        assert!(rcc.pll_locked());
+
+        rcc.set_hse_present(false);
+        assert!(!rcc.hse_ready());
+        assert!(!rcc.pll_locked(), "a PLL clocked from HSE loses lock");
+    }
+
+    #[test]
+    fn lse_never_settles_without_a_crystal() {
+        let mut rcc = Rcc::new();
+        rcc.set_lse_present(false);
+        let at = |ns: u64| Ctx::new(ns, Clocks::HSI_8MHZ);
+
+        write(&mut rcc, &at(0), reg::BDCR, bdcr::LSEON);
+        rcc.advance(&at(3_000_000_000), 0);
+        assert!(!rcc.lse_ready());
+
+        rcc.set_lse_present(true);
+        rcc.advance(&at(3_500_000_000), 0);
+        assert!(!rcc.lse_ready(), "32 kHz start-up takes about 2 s");
+        rcc.advance(&at(6_000_000_000), 0);
+        assert!(rcc.lse_ready());
+    }
+
+    #[test]
+    fn reset_keeps_the_board_crystals() {
+        let mut rcc = Rcc::new();
+        rcc.set_hse_present(false);
+        rcc.set_lse_present(false);
+        rcc.reset();
+        assert!(!rcc.hse_present());
+        assert!(!rcc.lse_present());
+        assert_eq!(rcc.hse_hz(), DEFAULT_HSE_HZ);
+    }
+
+    #[test]
     fn apb_prescalers_follow_rm0008_table() {
         let mut rcc = Rcc::new();
         let cx = ctx();
@@ -795,31 +1001,5 @@ mod tests {
             ),
             "expected the RCC interrupt to be raised, got {events:?}"
         );
-    }
-}
-
-impl Rcc {
-    /// Labelled state for the peripheral status browser.
-    pub fn status(&self) -> Vec<(&'static str, String)> {
-        let clocks = self.clocks();
-        let source = match field(self.cfgr, 2, 2) {
-            0 => "HSI",
-            1 => "HSE",
-            2 => "PLL",
-            _ => "保留",
-        };
-        vec![
-            ("时钟源", source.to_string()),
-            ("SYSCLK", crate::status::hz(clocks.sysclk_hz)),
-            ("HCLK", crate::status::hz(clocks.hclk_hz)),
-            ("PCLK1", crate::status::hz(clocks.pclk1_hz)),
-            ("PCLK2", crate::status::hz(clocks.pclk2_hz)),
-            ("ADC 时钟", crate::status::hz(clocks.adc_hz)),
-            ("CR", crate::status::hex(self.cr)),
-            ("CFGR", crate::status::hex(self.cfgr)),
-            ("APB1ENR", crate::status::hex(self.apb1enr)),
-            ("APB2ENR", crate::status::hex(self.apb2enr)),
-            ("CSR", crate::status::hex(self.csr)),
-        ]
     }
 }

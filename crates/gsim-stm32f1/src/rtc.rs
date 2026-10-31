@@ -225,6 +225,19 @@ impl Rtc {
 
 crate::impl_peripheral!(Rtc, "RTC");
 
+impl Rtc {
+    /// Labelled state for the peripheral status browser.
+    pub fn status(&self, _clocks: &gsim_core::Clocks) -> Vec<(&'static str, String)> {
+        vec![
+            ("计数", format!("{} s", self.counter)),
+            ("预分频", format!("{}", self.prescaler)),
+            ("闹钟", format!("{}", self.alarm)),
+            ("CRH", crate::status::hex(self.crh)),
+            ("CRL", crate::status::hex(self.crl)),
+        ]
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -302,18 +315,5 @@ mod tests {
         let mut rtc = Rtc::new();
         rtc.advance(&cx, 2_000_000_000);
         assert_eq!(rtc.counter(), 0);
-    }
-}
-
-impl Rtc {
-    /// Labelled state for the peripheral status browser.
-    pub fn status(&self, _clocks: &gsim_core::Clocks) -> Vec<(&'static str, String)> {
-        vec![
-            ("计数", format!("{} s", self.counter)),
-            ("预分频", format!("{}", self.prescaler)),
-            ("闹钟", format!("{}", self.alarm)),
-            ("CRH", crate::status::hex(self.crh)),
-            ("CRL", crate::status::hex(self.crl)),
-        ]
     }
 }

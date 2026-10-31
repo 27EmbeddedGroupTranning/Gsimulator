@@ -279,6 +279,28 @@ impl I2c {
 
 crate::impl_peripheral!(I2c, "I2C");
 
+impl I2c {
+    /// Labelled state for the peripheral status browser.
+    pub fn status(&self, _clocks: &gsim_core::Clocks) -> Vec<(&'static str, String)> {
+        vec![
+            ("使能", crate::status::on_off(self.cr1 & 1 != 0).to_string()),
+            (
+                "速度",
+                if self.ccr & (1 << 15) != 0 {
+                    "快速模式"
+                } else {
+                    "标准模式"
+                }
+                .to_string(),
+            ),
+            ("SR1", crate::status::hex(self.sr1)),
+            ("SR2", crate::status::hex(self.sr2)),
+            ("CCR", crate::status::hex(self.ccr)),
+            ("TRISE", crate::status::hex(self.trise)),
+        ]
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -372,22 +394,5 @@ mod tests {
             .unwrap();
         assert_eq!(i2c.read_reg(&cx, reg::CR1, AccessWidth::Word).unwrap(), 0);
         assert_eq!(i2c.read_reg(&cx, reg::CCR, AccessWidth::Word).unwrap(), 0);
-    }
-}
-
-impl I2c {
-    /// Labelled state for the peripheral status browser.
-    pub fn status(&self, _clocks: &gsim_core::Clocks) -> Vec<(&'static str, String)> {
-        vec![
-            ("使能", crate::status::on_off(self.cr1 & 1 != 0).to_string()),
-            (
-                "速度",
-                if self.ccr & (1 << 15) != 0 { "快速模式" } else { "标准模式" }.to_string(),
-            ),
-            ("SR1", crate::status::hex(self.sr1)),
-            ("SR2", crate::status::hex(self.sr2)),
-            ("CCR", crate::status::hex(self.ccr)),
-            ("TRISE", crate::status::hex(self.trise)),
-        ]
     }
 }

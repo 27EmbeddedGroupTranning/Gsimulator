@@ -244,6 +244,41 @@ impl GpioPort {
 
 crate::impl_peripheral!(GpioPort, "GPIO");
 
+impl GpioPort {
+    /// Labelled state for the peripheral status browser.
+    pub fn status(&self, _clocks: &gsim_core::Clocks) -> Vec<(&'static str, String)> {
+        let mut outputs = 0;
+        let mut analog = 0;
+        let mut alternate = 0;
+        for pin in 0..16u8 {
+            let (cnf, mode) = self.config(pin);
+            if mode != 0 {
+                outputs += 1;
+                if cnf & 0b10 != 0 {
+                    alternate += 1;
+                }
+            } else if cnf == 0b11 {
+                analog += 1;
+            }
+        }
+        let mut high = 0;
+        for pin in 0..16u8 {
+            if self.input_level(pin) {
+                high += 1;
+            }
+        }
+        vec![
+            ("输出引脚", format!("{outputs}（其中 {alternate} 个复用）")),
+            ("模拟输入", format!("{analog}")),
+            ("高电平引脚", format!("{high}")),
+            ("ODR", crate::status::hex(self.odr)),
+            ("IDR", crate::status::hex(self.idr())),
+            ("CRL", crate::status::hex(self.crl)),
+            ("CRH", crate::status::hex(self.crh)),
+        ]
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -354,40 +389,5 @@ mod tests {
             (0b00, 0b10),
             "unlocked pin follows the write"
         );
-    }
-}
-
-impl GpioPort {
-    /// Labelled state for the peripheral status browser.
-    pub fn status(&self, _clocks: &gsim_core::Clocks) -> Vec<(&'static str, String)> {
-        let mut outputs = 0;
-        let mut analog = 0;
-        let mut alternate = 0;
-        for pin in 0..16u8 {
-            let (cnf, mode) = self.config(pin);
-            if mode != 0 {
-                outputs += 1;
-                if cnf & 0b10 != 0 {
-                    alternate += 1;
-                }
-            } else if cnf == 0b11 {
-                analog += 1;
-            }
-        }
-        let mut high = 0;
-        for pin in 0..16u8 {
-            if self.input_level(pin) {
-                high += 1;
-            }
-        }
-        vec![
-            ("输出引脚", format!("{outputs}（其中 {alternate} 个复用）")),
-            ("模拟输入", format!("{analog}")),
-            ("高电平引脚", format!("{high}")),
-            ("ODR", crate::status::hex(self.odr)),
-            ("IDR", crate::status::hex(self.idr())),
-            ("CRL", crate::status::hex(self.crl)),
-            ("CRH", crate::status::hex(self.crh)),
-        ]
     }
 }

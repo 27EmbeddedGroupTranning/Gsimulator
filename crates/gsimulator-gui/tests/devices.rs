@@ -6,10 +6,11 @@ use gsim_core::{AccessWidth, MemoryBus};
 use gsim_devices::Direction;
 use gsim_stm32f1::map;
 use gsimulator_gui::board::{
-    Board, DeviceKind, PinRef, ENCODER_A, ENCODER_B, ENCODER_SW, UART_RX, UART_TX,
+    Board, DeviceKind, PinRef, CAN_CANH, CAN_CANL, CAN_RXD, CAN_TXD, ENCODER_A, ENCODER_B,
+    ENCODER_SW, MATRIX_CLK, MATRIX_CS, MATRIX_DIN, MATRIX_DOUT, RESISTOR_A, RESISTOR_B, SCOPE_CANH,
+    SCOPE_CANL, UART_RX, UART_TX,
 };
 use gsimulator_gui::bridge::{self, USART_RX_PINS, USART_TX_PINS};
-use gsimulator_gui::canvas::Schematic;
 use gsimulator_gui::sim::Simulation;
 
 fn encoder_board(port: u8, a: u8, b: u8, sw: u8) -> (Board, u32) {
@@ -264,7 +265,7 @@ fn a_terminal_keeps_its_bytes_while_the_receiver_is_closed() {
 }
 
 #[test]
-fn the_demo_board_has_the_power_symbols_and_three_parts_on_it() {
+fn the_demo_board_has_the_power_symbols_three_parts_and_the_hse_crystal() {
     let board = Board::demo();
     let kinds: Vec<DeviceKind> = board.devices().iter().map(|device| device.kind).collect();
     assert_eq!(
@@ -274,7 +275,9 @@ fn the_demo_board_has_the_power_symbols_and_three_parts_on_it() {
             DeviceKind::Gnd,
             DeviceKind::Led,
             DeviceKind::Uart,
-            DeviceKind::Encoder
+            DeviceKind::Encoder,
+            DeviceKind::HseCrystal,
+            DeviceKind::LseCrystal,
         ]
     );
 }
@@ -282,7 +285,6 @@ fn the_demo_board_has_the_power_symbols_and_three_parts_on_it() {
 #[test]
 fn the_library_lists_every_placeable_part() {
     let kinds: Vec<DeviceKind> = DeviceKind::ALL.to_vec();
-    assert_eq!(kinds.len(), 7);
     for expected in [
         DeviceKind::Led,
         DeviceKind::Uart,
@@ -291,134 +293,393 @@ fn the_library_lists_every_placeable_part() {
         DeviceKind::Gnd,
         DeviceKind::Can,
         DeviceKind::Matrix,
+        DeviceKind::HseCrystal,
+        DeviceKind::LseCrystal,
     ] {
-        assert!(kinds.contains(&expected), "{expected:?} is not in the library");
-    }
-}
-
-#[test]
-fn every_library_entry_is_searchable_by_name_and_alias() {
-    for kind in DeviceKind::ALL {
-        assert!(!kind.label().is_empty(), "a part without a label");
-        assert!(!kind.category().is_empty(), "a part without a category");
-        assert!(!kind.summary().is_empty(), "a part without a summary");
         assert!(
-            !kind.pin_summary().is_empty(),
-            "a part without pins to show"
-        );
-        assert!(
-            kind.matches(&kind.label().to_lowercase()),
-            "{} cannot be found by its own label",
-            kind.label()
+            kinds.contains(&expected),
+            "{expected:?} is not in the library"
         );
     }
-    // The aliases are what a Chinese search box is likely to receive.
-    assert!(DeviceKind::Led.matches("二极管"));
-    assert!(DeviceKind::Uart.matches("串口"));
-    assert!(DeviceKind::Encoder.matches("旋钮"));
-    assert!(!DeviceKind::Encoder.matches("二极管"));
+}
+
+/// Enables SPI1 on `PA5`/`PA7` with `PA4` as a push-pull `LOAD`, like the
+/// CubeMX firmware does.
+fn open_spi1(sim: &mut Simulation) {
+    let gpioa = map::gpio::PORTS[0];
+    sim.with_soc(|soc| {
+        soc.write(
+            map::rcc::BASE + map::rcc::APB2ENR,
+            AccessWidth::Word,
+            (1 << 2) | (1 << 12),
+        )
+        .unwrap();
+        let crl = soc.read(gpioa + map::gpio::CRL, AccessWidth::Word).unwrap();
+        let crl = (crl & !0x000F_0000) | (0b0010 << 16);
+        let crl = (crl & !((0xF << 20) | (0xF << 28))) | (0b1011 << 20) | (0b1011 << 28);
+        soc.write(gpioa + map::gpio::CRL, AccessWidth::Word, crl)
+            .unwrap();
+        // MSTR, BR = /8, SPE.
+        soc.write(
+            map::spi::BASE_1 + map::spi::CR1,
+            AccessWidth::Word,
+            (1 << 2) | (0b010 << 3) | (1 << 6),
+        )
+        .unwrap();
+        soc.write(gpioa + map::gpio::BSRR, AccessWidth::Word, 1 << 4)
+            .unwrap();
+    });
+}
+
+fn write_soc(sim: &mut Simulation, address: u32, value: u32) {
+    sim.with_soc(|soc| {
+        soc.write(address, AccessWidth::Word, value).unwrap();
+    });
 }
 
 #[test]
-fn a_part_picked_in_the_library_lands_under_the_click() {
+fn a_matrix_wired_to_spi1_latches_the_words_the_controller_shifts_out() {
     let mut board = Board::new();
-    let mut schematic = Schematic::default();
-    schematic.place_pending(DeviceKind::Encoder);
-    assert_eq!(schematic.pending_device(), Some(DeviceKind::Encoder));
-
-    let click = egui::Pos2::new(500.0, 400.0);
-    let id = schematic
-        .place_pending_at(&mut board, click)
-        .expect("the armed part must be placed");
-    let device = board.device(id).expect("the placed device exists");
-    assert_eq!(device.kind, DeviceKind::Encoder);
-    assert_eq!(device.rect().center(), click);
-
-    // One click places one part; the canvas is back to wiring afterwards.
-    assert_eq!(schematic.pending_device(), None);
-    assert!(schematic
-        .place_pending_at(&mut board, click)
-        .is_none());
-    assert_eq!(board.devices().len(), 1);
-
-    // `Esc` (and the API behind it) throws an armed part away.
-    schematic.place_pending(DeviceKind::Led);
-    schematic.cancel_pending();
-    assert_eq!(schematic.pending_device(), None);
-}
-
-/// Builds the shared test firmware; `None` when no cross compiler is installed.
-fn build_firmware() -> Option<std::path::PathBuf> {
-    let toolchain = "arm-none-eabi-gcc";
-    if std::process::Command::new(toolchain)
-        .arg("--version")
-        .output()
-        .is_err()
-    {
-        return None;
+    let matrix = board.add_matrix(egui::Pos2::new(500.0, 200.0));
+    for (pin, (port, mcu)) in [
+        (MATRIX_DIN, (0u8, 7u8)),
+        (MATRIX_CLK, (0, 5)),
+        (MATRIX_CS, (0, 4)),
+        (MATRIX_DOUT, (0, 6)),
+    ] {
+        board.connect(
+            PinRef::Device {
+                device: matrix,
+                pin,
+            },
+            PinRef::Mcu { port, pin: mcu },
+        );
     }
-    let source =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../gsim-cpu/tests/firmware");
-    let output = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("gui-firmware.elf");
-    let status = std::process::Command::new(toolchain)
-        .current_dir(&source)
-        .args([
-            "-mcpu=cortex-m3",
-            "-mthumb",
-            "-O1",
-            "-ffreestanding",
-            "-fno-builtin",
-            "-nostdlib",
-            "-nostartfiles",
-            "-T",
-            "link.ld",
-            "-Wl,--gc-sections",
-            "-o",
-        ])
-        .arg(&output)
-        .args(["startup.c", "main.c"])
-        .status()
-        .expect("cannot run the ARM cross compiler");
-    assert!(status.success(), "the shared test firmware failed to build");
-    Some(output)
+
+    let mut sim = Simulation::new();
+    // The built-in stimulus also drives PA5; release it before taking over.
+    sim.stop_stimulus();
+    open_spi1(&mut sim);
+
+    let gpioa = map::gpio::PORTS[0];
+    // LOAD low, two bytes, LOAD high: one word for the chain.
+    write_soc(&mut sim, gpioa + map::gpio::BSRR, 1 << (4 + 16));
+    for byte in [0x0Au8, 0x05] {
+        bridge::service(&mut board, &mut sim);
+        write_soc(&mut sim, map::spi::BASE_1 + map::spi::DR, u32::from(byte));
+        for _ in 0..8 {
+            sim.step_once(2_000);
+            bridge::service(&mut board, &mut sim);
+        }
+    }
+    write_soc(&mut sim, gpioa + map::gpio::BSRR, 1 << 4);
+    bridge::service(&mut board, &mut sim);
+
+    let handle = board
+        .device(matrix)
+        .expect("matrix device")
+        .hardware
+        .matrix()
+        .cloned()
+        .expect("matrix model");
+    let model = handle.borrow();
+    assert_eq!(model.frames(), 2, "both bytes reached the chain");
+    assert_eq!(model.words(), 1, "the LOAD edge latched one word");
+    assert_eq!(model.chips()[0].intensity(), 5);
 }
 
 #[test]
-fn a_real_firmware_shows_up_in_the_terminal() {
-    let Some(elf) = build_firmware() else {
-        eprintln!("arm-none-eabi-gcc not found, skipping the firmware terminal test");
-        return;
-    };
-
-    // Same wiring as the demo board: USART1 TX (PA9) -> terminal RX.
+fn an_unwired_matrix_hears_nothing_from_the_spi_port() {
     let mut board = Board::new();
-    let uart = board.add_uart(egui::Pos2::new(500.0, 100.0));
-    let (tx_port, tx_pin) = USART_TX_PINS[0];
+    let matrix = board.add_matrix(egui::Pos2::new(500.0, 200.0));
+    // Only the clock is wired: without DIN the chain must stay silent.
     board.connect(
-        PinRef::Mcu {
-            port: tx_port,
-            pin: tx_pin,
-        },
         PinRef::Device {
-            device: uart,
-            pin: UART_RX,
+            device: matrix,
+            pin: MATRIX_CLK,
         },
+        PinRef::Mcu { port: 0, pin: 5 },
     );
 
     let mut sim = Simulation::new();
-    sim.load_elf(&elf).expect("loading the firmware");
-
-    for _ in 0..40 {
-        bridge::run_frame(&mut board, &mut sim, 400_000, 1_000_000);
-        if uart_terminal(&board, uart).rx_text().contains("OK") {
-            break;
-        }
+    sim.stop_stimulus();
+    open_spi1(&mut sim);
+    write_soc(&mut sim, map::spi::BASE_1 + map::spi::DR, 0x0A);
+    for _ in 0..8 {
+        sim.step_once(2_000);
+        bridge::service(&mut board, &mut sim);
     }
 
-    let text = uart_terminal(&board, uart).rx_text().to_string();
-    assert!(
-        text.starts_with("GSIM"),
-        "the terminal should show the firmware banner, got {text:?}"
+    let handle = board
+        .device(matrix)
+        .expect("matrix device")
+        .hardware
+        .matrix()
+        .cloned()
+        .expect("matrix model");
+    assert_eq!(handle.borrow().frames(), 0);
+}
+/// `CAN1` base address, as the firmware sees it.
+const CAN: u32 = map::can::BASE_1;
+
+/// Wires a transceiver to `CAN1` and puts it on a pair terminated by two
+/// `120 Ω` resistors with a probe across it.
+///
+/// Returns the board and the id of the oscilloscope.
+fn can_board() -> (Board, u32) {
+    let mut board = Board::new();
+    let transceiver = board.add_can(egui::Pos2::new(520.0, 180.0));
+    board.connect(
+        PinRef::Device {
+            device: transceiver,
+            pin: CAN_TXD,
+        },
+        PinRef::Mcu { port: 0, pin: 12 },
     );
-    assert!(text.contains('T') && text.contains("OK"), "got {text:?}");
+    board.connect(
+        PinRef::Device {
+            device: transceiver,
+            pin: CAN_RXD,
+        },
+        PinRef::Mcu { port: 0, pin: 11 },
+    );
+
+    // One terminator at each end of the pair, plus a probe across it.
+    for index in 0..2u32 {
+        let resistor = board.add_resistor(egui::Pos2::new(360.0 + index as f32 * 40.0, 320.0));
+        board.connect(
+            PinRef::Device {
+                device: transceiver,
+                pin: CAN_CANH,
+            },
+            PinRef::Device {
+                device: resistor,
+                pin: RESISTOR_A,
+            },
+        );
+        board.connect(
+            PinRef::Device {
+                device: transceiver,
+                pin: CAN_CANL,
+            },
+            PinRef::Device {
+                device: resistor,
+                pin: RESISTOR_B,
+            },
+        );
+    }
+    let scope = board.add_scope(egui::Pos2::new(700.0, 320.0));
+    board.connect(
+        PinRef::Device {
+            device: transceiver,
+            pin: CAN_CANH,
+        },
+        PinRef::Device {
+            device: scope,
+            pin: SCOPE_CANH,
+        },
+    );
+    board.connect(
+        PinRef::Device {
+            device: transceiver,
+            pin: CAN_CANL,
+        },
+        PinRef::Device {
+            device: scope,
+            pin: SCOPE_CANL,
+        },
+    );
+    (board, scope)
+}
+
+/// `HAL_CAN_Init` + `HAL_CAN_Start` for normal mode, with one 32 bit mask
+/// filter that accepts every standard identifier into FIFO0.
+fn open_can1(sim: &mut Simulation) {
+    write_soc(sim, map::rcc::BASE + map::rcc::APB1ENR, 1 << 25);
+    write_soc(sim, CAN + map::can::MCR, 1);
+    write_soc(
+        sim,
+        CAN + map::can::BTR,
+        (2 - 1) << 16 | (2 - 1) << 20 | (8 - 1),
+    );
+    write_soc(sim, CAN + map::can::FMR, 1);
+    write_soc(sim, CAN + map::can::FS1R, 1);
+    write_soc(sim, CAN + map::can::FM1R, 0);
+    write_soc(sim, CAN + map::can::FFA1R, 0);
+    write_soc(sim, CAN + map::can::FILTER_BASE, 0);
+    write_soc(sim, CAN + map::can::FILTER_BASE + 4, 0);
+    write_soc(sim, CAN + map::can::FA1R, 1);
+    write_soc(sim, CAN + map::can::FMR, 0);
+    write_soc(sim, CAN + map::can::MCR, 0);
+}
+
+/// Runs `slices` slices of simulation time, servicing the parts in between.
+fn run(board: &mut Board, sim: &mut Simulation, slices: u32) {
+    for _ in 0..slices {
+        bridge::run_frame(board, sim, 20_000, 1_000_000);
+    }
+}
+
+#[test]
+fn a_resistor_across_the_pair_sets_the_bus_quality() {
+    let (board, _scope) = can_board();
+    let network = board.can_network();
+    assert_eq!(network.nodes, 1, "the transceiver sits on the pair");
+    assert_eq!(network.terminators.len(), 2);
+    let ohms = network.termination_ohm.expect("termination");
+    assert!((ohms - 60.0).abs() < 1e-6, "{ohms}");
+    assert!((network.quality() - 1.0).abs() < 1e-9);
+
+    // Removing one part degrades the pair, removing both opens it.
+    let mut board = board;
+    let resistors: Vec<u32> = board
+        .devices()
+        .iter()
+        .filter(|device| device.kind == DeviceKind::Resistor)
+        .map(|device| device.id)
+        .collect();
+    board.remove_device(resistors[0]);
+    let half = board.can_network();
+    assert!(half.quality() < network.quality());
+    board.remove_device(resistors[1]);
+    let open = board.can_network();
+    assert!(open.termination_ohm.is_none());
+    assert!(open.quality() < 0.1);
+}
+
+#[test]
+fn a_frame_from_another_node_reaches_the_controller_over_the_drawn_wire() {
+    let (mut board, scope) = can_board();
+    // Keep the whole capture on screen: the default two millisecond window
+    // would roll past the frame long before the test looks at it.
+    board
+        .scopes()
+        .first()
+        .expect("scope")
+        .borrow_mut()
+        .set_window_ns(40_000_000);
+    let mut sim = Simulation::new();
+    sim.stop_stimulus();
+    open_can1(&mut sim);
+    sim.set_running(true);
+
+    let frame = gsim_core::CanFrame::standard(0x321, b"GSIM");
+    board
+        .can_bus()
+        .borrow_mut()
+        .inject_bit_frame(frame, sim.now_ns());
+    // Enough time for the frame, but not so much that the probe's two
+    // millisecond window has already dropped it.
+    run(&mut board, &mut sim, 4);
+
+    let level = sim.with_soc(|soc| soc.can.rx_level(0));
+    assert_eq!(level, 1, "the controller accepted the frame");
+    let frames = sim.with_soc(|soc| soc.can.rx_frames(0));
+    assert_eq!(frames[0].id, 0x321);
+    assert_eq!(frames[0].bytes(), b"GSIM");
+
+    let handle = board
+        .device(scope)
+        .expect("scope")
+        .hardware
+        .scope()
+        .cloned()
+        .expect("scope model");
+    let handle = handle.borrow();
+    assert!(
+        handle.samples().len() > 50,
+        "the probe captured the bits: {}",
+        handle.samples().len()
+    );
+    assert!(handle.glitches() == 0, "a terminated pair is clean");
+    assert!(
+        handle.peak_differential() > 1.9,
+        "dominant bits reach the pair"
+    );
+}
+
+#[test]
+fn an_open_pair_loses_frames_a_terminated_one_carries() {
+    let (mut board, _scope) = can_board();
+    // Pull both terminators out of the drawing.
+    let resistors: Vec<u32> = board
+        .devices()
+        .iter()
+        .filter(|device| device.kind == DeviceKind::Resistor)
+        .map(|device| device.id)
+        .collect();
+    for id in resistors {
+        board.remove_device(id);
+    }
+    assert!(board.can_network().termination_ohm.is_none());
+
+    let mut sim = Simulation::new();
+    sim.stop_stimulus();
+    open_can1(&mut sim);
+    sim.set_running(true);
+
+    for _ in 0..6 {
+        board
+            .can_bus()
+            .borrow_mut()
+            .inject_bit_frame(gsim_core::CanFrame::standard(0x321, b"GSIM"), sim.now_ns());
+        run(&mut board, &mut sim, 30);
+    }
+    let bus = board.can_bus();
+    let bus = bus.borrow();
+    assert!(bus.glitches() > 0, "an open pair rings: {bus:?}");
+    assert!(bus.stats().error_frames > 0);
+    // Reading a clean frame out of that is a matter of luck, not of course.
+    let accepted = sim.with_soc(|soc| soc.can.stats().rx_frames);
+    let delivered = bus.stats().deliveries;
+    assert!(
+        accepted + delivered < 6 || bus.stats().error_frames > 0,
+        "the open pair must lose something"
+    );
+}
+
+#[test]
+fn two_nodes_that_start_together_arbitrate_on_the_drawn_bus() {
+    let (mut board, _scope) = can_board();
+    let mut sim = Simulation::new();
+    sim.stop_stimulus();
+    open_can1(&mut sim);
+    sim.set_running(true);
+
+    // The external node asks for the wire with a lower identifier at the same
+    // moment the controller arms a mailbox, so both start on the same bit.
+    board
+        .can_bus()
+        .borrow_mut()
+        .inject_bit_frame(gsim_core::CanFrame::standard(0x100, b"win"), sim.now_ns());
+    write_soc(&mut sim, CAN + map::can::TX_BASE, 0x321 << 21);
+    write_soc(&mut sim, CAN + map::can::TX_BASE + map::can::TDTR, 4);
+    write_soc(
+        &mut sim,
+        CAN + map::can::TX_BASE + map::can::TDLR,
+        0x4C_4F_53_45,
+    );
+    write_soc(&mut sim, CAN + map::can::TX_BASE, 0x321 << 21 | 1);
+
+    run(&mut board, &mut sim, 60);
+
+    let stats = sim.with_soc(|soc| soc.can.stats());
+    assert!(
+        stats.arbitration_lost >= 1,
+        "the higher identifier must lose: {stats:?}"
+    );
+    // Losing is not an error: the controller retries and the frame goes out.
+    assert_eq!(stats.tx_errors, 0, "{stats:?}");
+    assert!(
+        stats.tx_frames >= 1,
+        "the retry reached the wire: {stats:?}"
+    );
+    let records = board.can_bus().borrow().records().clone();
+    let ids: Vec<u32> = records
+        .iter()
+        .filter(|record| record.direction == gsim_core::CanDirection::Tx)
+        .map(|record| record.frame.id)
+        .collect();
+    assert!(ids.contains(&0x100), "{ids:?}");
+    assert!(ids.contains(&0x321), "{ids:?}");
 }

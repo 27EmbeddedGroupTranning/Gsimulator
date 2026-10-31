@@ -17,7 +17,7 @@ ELF 解析来自 [object](https://github.com/gimli-rs/object)。
 | --- | --- |
 | `gsim-core` | 与芯片无关的基础设施（总线、NVIC/SCB/SysTick、事件、时间） |
 | `gsim-stm32f1` | STM32F103 片上外设模型 |
-| `gsim-devices` | **片外器件模型**：UART 终端、旋转编码器、MAX7219、CAN 收发器/总线 |
+| `gsim-devices` | **片外器件模型**：UART 终端、旋转编码器、MAX7219、CAN 收发器/位级总线、电阻、示波器 |
 | `gsim-cpu` | Cortex-M3 执行前端 + ELF 装载 |
 | `gsim-gdb` | **虚拟 ST-Link**：GDB 远程协议服务器（烧录 + 调试） |
 | `gsimulator-cli` | 命令行（`run` / `gdb` / `demo` / `info`） |
@@ -29,24 +29,32 @@ ELF 解析来自 [object](https://github.com/gimli-rs/object)。
 
 ![Gsimulator 图形前端](docs/gui.png)
 
+*（上图是点「示例电路」后的接线；程序启动时画布是空的。）*
+
 ```powershell
-cargo run -p gsimulator-gui                     # 自动运行内置 PA5 方波，接上 LED 立刻能看到闪烁
+cargo run -p gsimulator-gui                     # 空画布启动：从器件库放置器件、连线
 cargo run -p gsimulator-gui -- path\to\app.elf  # 用真实固件的引脚输出驱动外设
 ```
 
-界面上可放置三类虚拟外设（LED、UART 终端、旋转编码器），都从工具栏的 **＋ 添加器件** 打开的
-「器件库」窗口里挑选（分类 + 搜索，像嘉立创 EDA 的器件面板），见下文“可放置的虚拟外设”。
+界面上可放置的器件全部来自工具栏 **＋ 添加器件** 打开的「器件库」窗口（分类 + 搜索，
+像嘉立创 EDA 的器件面板）：LED、UART 终端、旋转编码器、`VCC`/`GND` 电源符号、
+CAN 收发器、SPI 灯阵（MAX7219 8×8）、HSE/LSE 晶振。见下文“可放置的虚拟外设”。
 
 界面用 [egui/eframe](https://github.com/emilk/egui)（纯 Rust 立即模式 GUI）实现，分成几块：
 
-* **画布**：中间是 STM32F103C8T6 符号（PA0–PA15 / PB0–PB15 / PC13–PC15），
-  每个引脚带电平指示；右侧可放置虚拟外设与 `VCC`/`GND` 电源符号。
-* **器件库（＋ 添加器件）**：窗口按「指示 / 通信 / 交互」分类列出所有可放置的器件，
+* **画布**：中间是方形的 STM32F103C8T6 符号（左边 PA0–PA15、右边 PB0–PB15、底边 PC13–PC15、
+  顶边 PD0/PD1 = `OSC_IN`/`OSC_OUT`），每个引脚带电平指示；四周是放置上去的器件与电源符号。
+* **器件库（＋ 添加器件）**：窗口按「电源 / 时钟 / 指示 / 通信 / 交互 / 显示」分类列出所有可放置的器件，
   带符号预览、引脚名和搜索框。点卡片上的「放置」后画布跟随鼠标显示半透明符号，
   单击落点即可放下（`Esc` 结束）；也可以直接把卡片拖到画布上。
+  电源符号可以放任意多个，和器件一样能拖动、能 `Delete` 删除。
 * **接线（类似嘉立创 EDA / EasyEDA）**：点一个引脚 → 点另一个引脚 即完成一根连线；
-  也可以从一个引脚按住拖到目标引脚。连线按正交折线绘制，颜色跟随网络电平
-  （绿=高、蓝=低、红=短路、暗=悬空）。`Delete` 删除选中的连线或器件，中键拖动平移，滚轮缩放。
+  也可以从一个引脚按住拖到目标引脚。连线自动走**正交折线**，从引脚沿符号短桩出线，
+  并且**绕开画布上所有器件的外形**（布线在 `crates/gsimulator-gui/src/route.rs`，
+  先试直角/Z 形，拥挤时才走 A\*）；颜色跟随网络电平（绿=高、蓝=低、红=短路、暗=悬空）。
+  **自定义拐点**：选中连线后拖动线段即可拉出一个拐点，双击连线在点击处插入拐点，
+  拐点可以拖动（2 单位栅格吸附），选中拐点按 `Delete` 删掉它。
+  `Delete` 删除选中的连线或器件，中键拖动平移，滚轮缩放。
 * **状态面板**：仿真时间、实时倍率、指令数、中断/复位次数、总线访问与错误、完整时钟树
   （SYSCLK/HCLK/PCLK1/PCLK2/TIM2/ADC）、每个引脚的高低电平矩阵、虚拟外设列表（点亮状态 + 接线关系）、
   USART1 输出窗口。
@@ -55,7 +63,7 @@ cargo run -p gsimulator-gui -- path\to\app.elf  # 用真实固件的引脚输出
 
 | 来源 | 说明 |
 | --- | --- |
-| 内置激励 | 没有固件时默认运行：前端按配置的引脚与波形通过 `GPIOx->BSRR` 翻转（走真实寄存器路径，不是伪造电平）。默认 PA5、120 ms 半周期方波 |
+| 内置激励 | 默认关闭，点工具栏「内置激励」才启动：前端按配置的引脚与波形通过 `GPIOx->BSRR` 翻转（走真实寄存器路径，不是伪造电平），默认 PA5、120 ms 半周期方波 |
 | 真实固件 | `加载 ELF…` 选择一个 Cortex-M3 ELF，前端在 UI 线程内按预算执行指令并刷新状态 |
 
 工具栏的「内置激励」是一个开关：再次点击即停止波形、把引脚置低并交还为输入。
@@ -84,14 +92,38 @@ cargo run -p gsimulator-gui -- path\to\app.elf  # 用真实固件的引脚输出
 | **LED** | `A`（阳） `K`（阴） | 纯消费端，按网络电平点亮 | — |
 | **UART 终端** | `RX` `TX` | 把 MCU 在所选 USART 上**真实移位输出**的字节显示成文本，并把输入的文本送进该 USART 的接收器 | 面板里选 USART1/2/3、输入后回车或点“发送”、“清空” |
 | **旋转编码器** | `A` `B` `SW` | 正交编码器（自带 10 k 上拉，接触点被主动驱动）：一个定位点 = 4 个四分之一相位（格雷码），每 2 ms 释放一个边沿；轴按下时把 `SW` 拉低 | 画布上**滚轮**转旋钮、**点击**按轴；也可用面板按钮 |
+| **VCC / GND 电源** | `+` / `-` | 电源符号：接到的整个网络被拉成高电平 / 低电平（`VCC` 和 `GND` 接到同一网络即短路告警） | 可放多个，拖动、`Delete` 删除；状态面板的「电源」按钮从第一个符号起线 |
+| **CAN 收发器** | `TXD` `RXD` `CANH` `CANL` | 物理层：`TXD` 的电平按位驱动总线对，`RXD` 回送总线（线与）采样到的电平；`CANH`/`CANL` 才是真正的两条线，要接到同一个网络的终端电阻与探头 | 画布显示模式与收发帧数；「CAN 总线」窗口可看帧、注入帧、切换模式、查看总线质量 |
+| **电阻** | `1` `2` | 无源器件，本身不驱动任何东西：跨接在 `CANH`/`CANL` 上就是**终端电阻**，并联值决定总线质量（默认 120 Ω，可在面板改值） | 面板里改阻值；拆掉/减少终端电阻，总线会开始丢帧 |
+| **示波器** | `H` `L` | 两通道探头，`H` 接 `CANH`、`L` 接 `CANL` 后每个仿真位采样一次，画出两条线的电压与差分；振铃导致的翻转会用红色竖线标出 | 「📈 示波器」窗口：时基、档位、差分视图、冻结/清空 |
+| **SPI 灯阵** | `DIN` `CLK` `CS` `DOUT` | MAX7219 驱动的 8×8 点阵：按 SPI 时钟移位、`CS` 上升沿锁存一个 16 位字，`DOUT` 回送 16 位前的字节（供固件回读） | 画布上直接显示点阵画面；「外设浏览」里有寄存器细节与放大预览 |
+| **HSE 晶振** | `X1` `X2` | 8 MHz 高速晶体，接在 `OSC_IN`/`OSC_OUT`（PD0/PD1）。只有接好晶体、固件又置位 `HSEON`，`HSERDY` 才会在起振时间后置位；没接晶体时就像裸片一样永远等不到 ready | 放好后把 `X1`/`X2` 接到 PD0/PD1（无极性）。起振时 PD0/PD1 与连线按晶振频率真实翻转（采样到画布上就是闪烁），停止后自动释放 |
+| **LSE 晶振** | `X1` `X2` | 32.768 kHz 手表晶振，接在 `OSC32_IN`/`OSC32_OUT`（PC14/PC15），给 RTC 当时钟源；同样只有固件置位 `LSEON` 才起振 | 接到 PC14/PC15（无极性）。起振时 PC14/PC15 与连线同样真实翻转 |
 
-接线规则（EDA 风格，模型在 `crates/gsim-devices/src/{uart,encoder}.rs`）：
+画布**默认是空的**（没有默认电路、也没有默认激励）：需要什么器件就从「器件库」里放，
+工具栏的「示例电路」才会恢复 LED/UART/编码器/两颗晶振的演示接线。
+
+**时钟源由固件 ELF 决定**：仿真只负责板上有哪些晶振（HSE/LSE 是否接着），
+固件自己的 RCC 配置决定用 HSI、HSE、PLL 还是 LSE/LSI（`SW`、`PLLSRC`、`RTCSEL`）。
+两颗晶体都接着也不会互相抢占，只有被 `HSEON`/`LSEON` 打开的那颗才开始起振。
+「外设浏览」的 RCC 行会显示「HSE 晶振 8 MHz · 稳定 / 未起振 / 未接晶振」与 LSE 的同样信息。
+
+接线规则（EDA 风格，模型在 `crates/gsim-devices/src/{uart,encoder,max7219,can_bus,crystal}.rs`）：
 
 * **UART**：只有当终端的 `RX` 真的接在该 USART 的 `TX` 引脚（USART1=PA9、USART2=PA2、USART3=PB10）上时，
   才收得到字节；只有 `TX` 接在该 USART 的 `RX` 引脚（PA10 / PA3 / PB11）上时，输入的内容才会进 MCU。
   没接通时终端把字节排队，面板显示“N 字节待发送（等待连线）”。
 * **编码器**：`A`/`B`/`SW` 各自驱动所连的 MCU 引脚（走 `Soc::gpio_set_input`，
   所以 EXTI 边沿与 `IDR` 轮询都能看到）；没接线的接触点不会动任何引脚。
+* **CAN**：`TXD` 接 `CAN1_TX`（PA12）、`RXD` 接 `CAN1_RX`（PA11）之后控制器才真正接上总线；
+  `CANH`/`CANL` 分别组成两条网络，同一条总线上的收发器、终端电阻、探头都按网络连通性识别。
+  跨接在两条网络之间的电阻**并联**成终端电阻（两只 120 Ω = 60 Ω，教科书值），
+  没有终端电阻时线路会振铃并翻转位（见下文“CAN 物理层”）。
+* **SPI 灯阵**：`CLK` 与 `DIN` 必须落在同一个 SPI 口的 `SCK`/`MOSI`（SPI1=PA5/PA7、SPI2=PB13/PB15、
+  SPI3=PC10/PC12）上才会收到字节，`CS` 接任意 GPIO 作 `LOAD`；`DOUT` 接该口的 `MISO`
+  （PA6 / PB14 / PC11）时固件才能读回回声。换到别的口或拆掉连线，点阵立刻听不到数据。
+* **晶振**：`X1`/`X2` 必须真的跨接在对应振荡脚上（HSE = PD0/PD1，LSE = PC14/PC15）才算装了晶体，
+  方向随意、只接一根不算；拔掉器件或拆掉线，RCC 会立刻看到振荡器消失（`HSERDY`/`LSERDY` 掉下来）。
 
 引脚注入与采样在**指令之间**进行（`crates/gsimulator-gui/src/bridge.rs` 把一帧切成约 1 ms 的仿真时间片，
 每片先服务外设再推进 CPU），因此固件轮询 `IDR` 或等待 EXTI 都能真正捕捉到编码器边沿。
@@ -115,12 +147,13 @@ cargo test  --workspace        # 全部测试（含真实固件执行测试）
 cargo clippy --workspace --all-targets
 ```
 
-三个可以直接运行的能力：
+几个可以直接运行的能力：
 
 ```powershell
 cargo run -p gsimulator-cli -- demo                # 无 ELF：脚本化巡览全部外设并打印时序
 cargo run -p gsimulator-cli -- info                # 打印模拟的内存映射
 cargo run -p gsimulator-cli -- run firmware.elf    # 加载并执行真实 Cortex-M3 ELF 固件
+cargo run -p gsimulator-cli -- flash firmware.elf  # 烧进模拟 flash（擦除+编程+回读校验）
 cargo run -p gsimulator-cli -- gdb                 # 虚拟 ST-Link：给 GDB 烧录 + 调试（见下）
 cargo run -p gsimulator-gui                        # 图形前端（虚拟接线台，见第 0 节）
 ```
@@ -136,6 +169,17 @@ cargo run -p gsimulator-gui                        # 图形前端（虚拟接线
 | `--registers` | 结束时打印 r0-r3/r12/sp/lr/pc |
 
 固件的 USART1 输出直接写到 stdout，其余诊断信息写到 stderr，方便管道处理。
+
+`flash` 只有一个选项 `--hse <HZ>`：按 ELF 的加载地址**逐页擦除 → 半字编程 → 回读校验**，
+最后打印向量表（SP 与复位入口符号），等价于 `openocd ... -c "program app.elf verify"`：
+
+```powershell
+cargo run -p gsimulator-cli -- flash firmware/CAN/build/Debug/CAN.elf
+# flashed ... (12040 bytes in 13 pages, read back and verified)
+# vector table: sp=0x20005000 reset=0x08002B40 (Reset_Handler)
+```
+
+想烧完直接跑就用 `run`，想烧完断点调试就用 `gdb`（下一节）。
 
 ### 运行真实 ELF
 
@@ -226,8 +270,10 @@ GDB 里可用的能力：
 
 - **为什么不是 OpenOCD？** `interface/stlink.cfg` 走的是真实 USB 硬件；而且常见发行版
   （包括 EIDE 自带的那份）没有编译 `remote_bitbang` 一类的网络适配器，OpenOCD 没有可以
-  指向模拟器的后端。所以本仓库只实现 GDB 服务器的这一半：端口、连接方式、`load` 语义都
-  和 OpenOCD 一致，GDB/IDE 侧不用改。
+  指向模拟器的后端（`openocd -c "adapter list"` 里那 19 个适配器全是 USB 探针）。所以本仓库
+  把 GDB 服务器的这一半自己做掉了：端口、连接方式、`load` 语义都和 OpenOCD 一致，GDB/IDE
+  侧不用改；只想“烧一下”而不调试时用 `gsimulator flash app.elf`，它等价于
+  `openocd ... -c "program app.elf verify"`。
 - `load` 之后核心的 SP/PC 仍是加载前的值（真实芯片也一样），所以要么 `monitor reset`，
   要么直接用 `run`（`vRun` 会先复位再从向量表跑）。
 - GDB 的寄存器缓存只在“停下”时刷新：`monitor reset` 之后如果想立刻看寄存器，先 `stepi`
@@ -244,7 +290,7 @@ crates/
   gsim-devices/   片外器件模型（MAX7219 点阵、CAN 收发器 + 虚拟总线）
   gsim-cpu/       Cortex-M3 执行前端 + ELF 装载 + SoC 桥接
   gsimulator-cli/ 命令行（run / demo / info）
-  gsimulator-gui/ 图形前端（虚拟接线台：画布 + 虚拟外设 + 状态面板 + 外设浏览 + CAN 总线窗口）
+  gsimulator-gui/ 图形前端（虚拟接线台：画布 + 虚拟外设 + 状态面板 + 外设浏览 + CAN 总线窗口 + 示波器）
 firmware/         已有的 CubeMX 固件工程（CAN 回环 + SPI + MAX7219，已在模拟器中跑通）
 ```
 
@@ -296,7 +342,7 @@ firmware/         已有的 CubeMX 固件工程（CAN 回环 + SPI + MAX7219，�
 | USART1-3 | `SR/DR/BRR/CR1-3`，真实帧时间（`frame_bits × BRR / fCK`）、TXE/TC/RXNE/ORE、中断、DMA 请求、可注入接收字节 |
 | SPI1-2 | `CR1/CR2/SR/DR`，主/从、BR 分频、8/16 位帧、TXE/RXNE/BSY/OVR、按帧时长推进、MISO 注入、DMA 请求 |
 | I2C1-2 | `CR1/CR2/OAR/SR1/SR2/CCR/TRISE`，START/STOP、地址/数据阶段、`AF` NACK（本阶段总线无器件）、事件/错误中断 |
-| CAN1 (bxCAN) | `MCR/MSR/TSR/RF0R/RF1R/IER/ESR/BTR`、3 个发送邮箱（RQCP/TXOK/ABRQ、邮箱优先级）、2 个接收 FIFO（3 帧深、FMP/FULL/FOVR/RFOM）、14 组验收滤波器（16/32 位、列表/掩码）、初始化/睡眠/回环/静默模式、按 `BTR` 计算真实帧时间、TEC/REC 错误计数、CAN1_TX/RX0/RX1/SCE 四条中断线 |
+| CAN1 (bxCAN) | `MCR/MSR/TSR/RF0R/RF1R/IER/ESR/BTR`、3 个发送邮箱（RQCP/TXOK/ALST/TERR/ABRQ、按 ID 或请求顺序的发送优先级）、2 个接收 FIFO（3 帧深、FMP/FULL/FOVR/RFOM）、14 组验收滤波器（16/32 位、列表/掩码）、初始化/睡眠/回环/静默模式、**位级收发**（位填充、CRC-15、线与仲裁、ACK 槽、错误帧、TEC/REC/bus-off）、CAN1_TX/RX0/RX1/SCE 四条中断线 |
 | TIM1-4 | `PSC/ARR/RCR/CCRx/CCMRx/CCER/BDTR`，上/下/中央对齐计数、更新事件与重复计数、比较匹配、PWM 输出电平、输入捕获、单脉冲、DMA 请求 |
 | ADC1-2 | `SR/CR1/CR2/SMPR/SQR/JOFR/DR`，采样时间→转换时间、单次/连续/扫描、校准序列、EOC/STRT、DMA 请求、按通道注入电压 |
 | DMA1/2 | `ISR/IFCR/CCRx/CNDTR/CPAR/CMAR`，请求路由表（RM0008）、软件优先级、增量、循环、HT/TC 标志与中断 |
@@ -323,17 +369,49 @@ firmware/         已有的 CubeMX 固件工程（CAN 回环 + SPI + MAX7219，�
 | --- | --- | --- |
 | **MAX7219 点阵** | SPI1（`PA5` SCK、`PA7` MOSI）+ `PA4` LOAD | 在 LOAD 上升沿锁存 16 位字（地址+数据），支持级联、`DIGIT0..7`/`DECODE`/`INTENSITY`/`SCAN_LIMIT`/`SHUTDOWN`/`DISPLAY_TEST` 寄存器、8×8 像素渲染；`DOUT` 回显 16 位前的数据（`MAX7219_EchoTest()` 可回读） |
 | **CAN 收发器** | CAN1（`PA12` TXD、`PA11` RXD） | 把控制器发出的帧送上虚拟总线、把总线上的帧交给控制器 FIFO；三种模式（正常/只听/待机），统计收发/回环/拒发帧数；丢弃的帧不会占用总线 |
-| **虚拟 CAN 总线** | `Rc<RefCell<CanBus>>` 共享 | 多节点（多个 `Soc`、或 GUI 的注入面板）共用一条线；记录每帧的时间戳、节点、方向、ID、数据与应答状态，供 CAN 总线窗口显示 |
+| **虚拟 CAN 总线** | `Rc<RefCell<CanBus>>` 共享 | 位级线与总线：一次推进一位，所有节点的驱动电平做线与；终端电阻并联值 → 线路质量 → 按概率翻转位；虚拟节点（注入面板/第二个 ECU）跑同一套位机器，因此真会仲裁、应答、报错；记录每帧的时间戳、节点、方向、ID、数据与应答状态 |
 
-GUI 里这两个器件**固定焊在板上**（与 CubeMX 工程的接线一致），并分别出现在：
+GUI 里这两个器件来自器件库（工具栏 `＋ 添加器件`，或把卡片拖到画布），接线与 CubeMX 工程一致
+（MAX7219：`PA5`/`PA7`/`PA4`；CAN 收发器：`PA11`/`PA12` + 一条虚拟总线）。**它们只存在于画布上**：
+没放置就没有模型、也没有外设浏览条目；拆掉连线立刻听不到总线/SPI 数据。放好之后分别出现在：
 
-* **外设状态浏览窗口**（工具栏 `🔍 外设浏览`）：左侧列出全部片上外设 + 两个片外器件，
-  右侧是实时解码状态；选中 MAX7219 时还会画出 8×8 点阵预览。
-* **CAN 总线状态窗口**（工具栏 `🚌 CAN 总线`）：控制器寄存器（模式/波特率/邮箱/FIFO/滤波器/
-  错误计数）、收发器状态与计数、按时间排序的帧记录（时间/节点/方向/ID/DLC/数据/ACK），
-  以及一帧注入面板（可扮演第二个 ECU）。
+* **外设状态浏览窗口**（工具栏 `🔍 外设浏览`）：左侧列出全部片上外设，以及画布上放好的片外器件
+  （按画布上的器件名，如 `MX1`、`CAN1`、`R1`、`OSC1`），右侧是实时解码状态；选中点阵时还会画出 8×8 点阵预览。
+* **画布符号**：CAN 收发器直接显示模式与收发帧数，SPI 灯阵直接显示 8×8 画面，
+  电阻显示阻值，示波器在符号里直接画出最近的波形。
+* **CAN 总线状态窗口**（工具栏 `🚌 CAN 总线`）：总线电气状态（终端电阻/总线质量/位时间/位错误率/
+  尖峰/仲裁失败/错误帧/节点）、控制器寄存器（模式/波特率/邮箱/FIFO/滤波器/错误计数）、
+  收发器状态与计数、按时间排序的帧记录（时间/节点/方向/ID/DLC/数据/ACK），
+  以及一帧注入面板（可扮演第二个 ECU，注入的帧真的走线与仲裁）。
+* **示波器窗口**（工具栏 `📈 示波器`）：探头抓到的 `CANH`/`CANL` 电压、差分视图、时基与冻结，
+  线路振铃造成的翻转用红色竖线标出（没有放探头时窗口会提示怎么接线）。
 
 超时复位、看门狗复位都会走同一条 `Soc::system_reset()` 路径，并在 `RCC_CSR` 里留下复位原因。
+
+### CAN 物理层（位级总线、仲裁与终端电阻）
+
+CAN 不是“帧队列”，而是真实的两线差分总线。这条链路上每一层都有自己的模型：
+
+| 层 | 位置 | 做什么 |
+| --- | --- | --- |
+| 帧编码 | `gsim-core/src/can.rs` | `CanFrame` ↔ `WireFrame`：SOF、标准/扩展标识符、RTR/IDE、DLC、数据、CRC-15（多项式 `x^15+x^14+x^10+x^8+x^7+x^4+x^3+1`）、**位填充**（连续 5 位相同后插一位相反电平，CRC 序列末尾同样会插）、CRC 分隔符、ACK 槽、EOF 与 3 位间歇 |
+| 解码 | `gsim-core/src/can.rs` | `FrameDecoder`：去填充、CRC 校验、ACK 槽、EOF；任何违规立即回报 `Stuff/Crc/Form/Acknowledge/Bit` 错误 |
+| 控制器 | `gsim-stm32f1/src/can.rs` | bxCAN 把邮箱内容逐位移出（`driven_level`），并采样总线（`sample_bit`）：**线与**上出现“自己发隐性、线上是显性”即**仲裁失败**（保留邮箱、置 `TSR.ALSTx`、等总线空闲重试）；接收方在 ACK 槽拉显性，没人应答就是 `Acknowledge` 错误 → 发 6 显性 + 8 隐性的**错误帧**、`TEC += 8`、`REC += 8`，`REC/TEC ≥ 128` 错误被动，`TEC ≥ 256` bus-off（`ABOM` 时等 11 位隐性自动恢复） |
+| 总线 | `gsim-devices/src/can_bus.rs` | 一次一位地推进：所有节点驱动的电平做**线与**（任何显性 → 显性），终端电阻的并联值算出线路质量，质量不够就按概率翻转位（`glitches`）；虚拟节点（注入面板 / 第二个 ECU）跑同一套位机器，所以真的会仲裁、应答、报错 |
+| 接线 | `gsimulator-gui/src/bridge.rs` | 每片仿真时间按 CAN 位时间（`BTR` 决定）切片，每片：读控制器 `driven_level` → `bus.step` → 把采样电平喂回控制器、喂给示波器探头 |
+
+终端电阻与通讯质量的关系（`quality_of` / `bit_error_rate`）：
+
+| 并联终端 | 质量 | 位错误率 | 效果 |
+| --- | --- | --- | --- |
+| 60 Ω（两个 120 Ω，一端一个） | 100 % | 0 | 教科书接法，帧全部干净送达 |
+| 120 Ω（只留一个） | 67 % | 0.11 %/位 | 能用，但偶发振铃与重传（示波器上会看到尖峰） |
+| 30 Ω / 240 Ω | 67 % / 0 % | 0.11 % / 3 % | 负载过重 / 严重失配 |
+| 开路（没有终端电阻） | 3 % | 2.7 %/位 | 大部分帧 CRC 错 / 应答错，控制器 `TEC` 一路上涨 |
+
+`cargo run -p gsimulator-cli -- demo` 会现场演示：`0x321` 与对手节点的 `0x100` 同时起跑时
+**仲裁失败 1 次**（低 ID 胜出，高 ID 保留邮箱重试），随后对比“两个 120 Ω / 一个 120 Ω / 没有终端电阻”
+三种接法的尖峰与错误帧数量。
 
 ### 已知简化（有意为之）
 
@@ -342,8 +420,9 @@ GUI 里这两个器件**固定焊在板上**（与 CubeMX 工程的接线一致�
 * 本阶段 I2C 总线上没有器件，因此主机寻址一律 NACK（`SR1.AF`），符合“空总线”的真实行为。
 * SPI 的 MISO 由外部器件在每一帧之前给定（`Spi::set_miso`/`Soc::spi_set_miso`）；MAX7219 用
   这个通道实现 DOUT 回显。
-* CAN 不做位级仲裁与位填充：发送的帧总是被应答（`TXOK`），只有器件模型显式报告故障时
-  TEC/REC 才变化；CAN2/USB 未建模。
+* CAN 的位定时只用来定“一位多长”（`BTR` 的 `BRP/TS1/TS2`），不细分采样点位置；
+  同步段/传播段不单独建模，位填充也只按 5 位规则插入与检查。
+* 终端电阻只影响位错误率与振铃幅度，不做真正的传输线反射计算；`CAN2`/USB 未建模。
 * 外设时钟门控默认只影响“是否推进仿真”，不阻止寄存器访问；`Soc::set_strict_clock_gating(true)`
   可让未开时钟的外设访问返回总线错误。
 
@@ -439,10 +518,11 @@ while let Some(frame) = transceiver.poll() {
   SPI1 主机写寄存器 → MAX7219 显示点阵；CAN 控制器发帧 → 收发器 → 虚拟总线 → 另一节点的接收 FIFO。
 * `crates/gsimulator-gui`：板级电气规则（网络合并、短路、LED 极性）、EDA 式点击连线状态机、
   无窗口整帧渲染、可配置激励（引脚 / 方波 / 占空比 / 自定义函数表达式求值器），
+  外设状态浏览与 CAN 总线两个窗口的离屏渲染，
   以及“内置激励 → 引脚 → 连线 → LED 点亮”“编码器 → MCU 引脚”
   “真实固件 → 虚拟终端”“终端输入 → USART 接收器”四条端到端链路。
 
-当前 265 个测试全部通过（GPU 离屏渲染、真实固件执行、真实 GDB 会话等测试在缺少
+当前 336 个测试全部通过（GPU 离屏渲染、真实固件执行、真实 GDB 会话等测试在缺少
 GPU / 交叉编译器 / `arm-none-eabi-gdb` 时会自动跳过）。
 
 ```powershell

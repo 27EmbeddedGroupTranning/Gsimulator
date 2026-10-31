@@ -333,6 +333,22 @@ impl FlashInterface {
     }
 }
 
+impl FlashInterface {
+    /// Labelled state for the peripheral status browser.
+    pub fn status(&self, _clocks: &gsim_core::Clocks) -> Vec<(&'static str, String)> {
+        vec![
+            ("等待周期", format!("{}", self.acr & 0b111)),
+            (
+                "编程解锁",
+                if self.key_stage >= 2 { "是" } else { "否" }.to_string(),
+            ),
+            ("状态 SR", crate::status::hex(self.sr)),
+            ("控制 CR", crate::status::hex(self.cr)),
+            ("目标地址 AR", crate::status::hex(self.ar)),
+        ]
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -434,24 +450,5 @@ mod tests {
             .unwrap();
         assert_eq!(flash.take_erase(), Some(Erase::Page(FLASH_BASE + 0x400)));
         assert_eq!(flash.take_erase(), None);
-    }
-}
-
-impl FlashInterface {
-    /// Labelled state for the peripheral status browser.
-    pub fn status(&self, _clocks: &gsim_core::Clocks) -> Vec<(&'static str, String)> {
-        vec![
-            (
-                "等待周期",
-                format!("{}", self.acr & 0b111),
-            ),
-            (
-                "编程解锁",
-                if self.key_stage >= 2 { "是" } else { "否" }.to_string(),
-            ),
-            ("状态 SR", crate::status::hex(self.sr)),
-            ("控制 CR", crate::status::hex(self.cr)),
-            ("目标地址 AR", crate::status::hex(self.ar)),
-        ]
     }
 }

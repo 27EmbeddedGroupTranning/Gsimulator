@@ -1,6 +1,7 @@
 //! Gsimulator command line front end.
 
 mod demo;
+mod flash;
 mod gdb;
 mod run;
 
@@ -16,6 +17,7 @@ USAGE:
 COMMANDS:
     run <firmware.elf>   Load and execute a real ARM Cortex-M3 ELF image
     gdb [firmware.elf]   Serve a virtual ST-Link so GDB can flash and debug
+    flash <firmware.elf> Program an image into the simulated flash (and verify)
     demo                 Scripted tour of every phase 1 peripheral
     info                 Print the simulated memory map
     help                 Print this message
@@ -36,6 +38,9 @@ OPTIONS for `gdb`:
         --no-uart                Do not print the firmware's UART output
     -v, --verbose                Log protocol activity on stderr
 
+OPTIONS for `flash`:
+        --hse <HZ>               Crystal frequency on OSC_IN (default 8,000,000)
+
 UART output of the firmware is written to stdout; diagnostics go to stderr.";
 
 fn main() -> ExitCode {
@@ -52,6 +57,10 @@ fn main() -> ExitCode {
         },
         "gdb" => match parse_gdb(args) {
             Ok(options) => finish(gdb::run(options)),
+            Err(message) => usage_error(&message),
+        },
+        "flash" => match parse_flash(args) {
+            Ok(options) => finish(flash::run(options)),
             Err(message) => usage_error(&message),
         },
         "demo" => finish(demo::run()),
@@ -177,6 +186,34 @@ fn parse_gdb(args: impl Iterator<Item = String>) -> Result<gdb::GdbOptions, Stri
     }
 
     options.elf = elf;
+    Ok(options)
+}
+
+fn parse_flash(args: impl Iterator<Item = String>) -> Result<flash::FlashOptions, String> {
+    let mut options = flash::FlashOptions::default();
+    let mut elf: Option<PathBuf> = None;
+    let mut args = args.peekable();
+
+    while let Some(argument) = args.next() {
+        match argument.as_str() {
+            "--hse" => options.hse_hz = parse_number(&mut args, "hse")? as u32,
+            "-h" | "--help" => {
+                println!("{USAGE}");
+                std::process::exit(0);
+            }
+            other if other.starts_with('-') => {
+                return Err(format!("unknown option `{other}`"));
+            }
+            other => {
+                if elf.is_some() {
+                    return Err(format!("unexpected argument `{other}`"));
+                }
+                elf = Some(PathBuf::from(other));
+            }
+        }
+    }
+
+    options.elf = elf.ok_or_else(|| "`flash` needs the path of an ELF file".to_string())?;
     Ok(options)
 }
 

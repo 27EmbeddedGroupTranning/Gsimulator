@@ -250,6 +250,45 @@ impl Bkp {
 
 crate::impl_peripheral!(Bkp, "BKP");
 
+impl Pwr {
+    /// Labelled state for the peripheral status browser.
+    pub fn status(&self, _clocks: &gsim_core::Clocks) -> Vec<(&'static str, String)> {
+        vec![
+            (
+                "低功耗模式",
+                match self.requested_mode() {
+                    LowPowerMode::Run => "运行",
+                    LowPowerMode::Sleep => "睡眠",
+                    LowPowerMode::Stop => "停止",
+                    LowPowerMode::Standby => "待机",
+                }
+                .to_string(),
+            ),
+            (
+                "备份域访问",
+                crate::status::on_off(self.backup_access_enabled()).to_string(),
+            ),
+            ("CR", crate::status::hex(self.cr)),
+            ("CSR", crate::status::hex(self.csr)),
+        ]
+    }
+}
+
+impl Bkp {
+    /// Labelled state for the peripheral status browser.
+    pub fn status(&self, _clocks: &gsim_core::Clocks) -> Vec<(&'static str, String)> {
+        vec![
+            (
+                "写使能",
+                crate::status::on_off(self.write_enabled).to_string(),
+            ),
+            ("RTCCR", crate::status::hex(self.rtccr)),
+            ("备份数据 DR1", format!("0x{:04X}", self.data[0])),
+            ("备份数据 DR10", format!("0x{:04X}", self.data[9])),
+        ]
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -300,38 +339,5 @@ mod tests {
         pwr.write_reg(&cx, reg::CR, AccessWidth::Word, cr::PDDS)
             .unwrap();
         assert_eq!(pwr.requested_mode(), LowPowerMode::Standby);
-    }
-}
-
-impl Pwr {
-    /// Labelled state for the peripheral status browser.
-    pub fn status(&self, _clocks: &gsim_core::Clocks) -> Vec<(&'static str, String)> {
-        vec![
-            (
-                "低功耗模式",
-                match self.requested_mode() {
-                    LowPowerMode::Run => "运行",
-                    LowPowerMode::Sleep => "睡眠",
-                    LowPowerMode::Stop => "停止",
-                    LowPowerMode::Standby => "待机",
-                }
-                .to_string(),
-            ),
-            ("备份域访问", crate::status::on_off(self.backup_access_enabled()).to_string()),
-            ("CR", crate::status::hex(self.cr)),
-            ("CSR", crate::status::hex(self.csr)),
-        ]
-    }
-}
-
-impl Bkp {
-    /// Labelled state for the peripheral status browser.
-    pub fn status(&self, _clocks: &gsim_core::Clocks) -> Vec<(&'static str, String)> {
-        vec![
-            ("写使能", crate::status::on_off(self.write_enabled).to_string()),
-            ("RTCCR", crate::status::hex(self.rtccr)),
-            ("备份数据 DR1", format!("0x{:04X}", self.data[0])),
-            ("备份数据 DR10", format!("0x{:04X}", self.data[9])),
-        ]
     }
 }

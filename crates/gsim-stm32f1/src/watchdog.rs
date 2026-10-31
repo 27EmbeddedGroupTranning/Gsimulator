@@ -280,6 +280,33 @@ impl Wwdg {
 
 crate::impl_peripheral!(Wwdg, "WWDG");
 
+impl Iwdg {
+    /// Labelled state for the peripheral status browser.
+    pub fn status(&self, _clocks: &gsim_core::Clocks) -> Vec<(&'static str, String)> {
+        vec![
+            ("运行", crate::status::on_off(self.running).to_string()),
+            ("计数器", format!("{}", self.counter)),
+            ("重装值", format!("{}", self.rlr & 0xFFF)),
+            ("超时周期", format!("{} 个 LSI 周期", self.reload_cycles())),
+        ]
+    }
+}
+
+impl Wwdg {
+    /// Labelled state for the peripheral status browser.
+    pub fn status(&self, _clocks: &gsim_core::Clocks) -> Vec<(&'static str, String)> {
+        vec![
+            (
+                "使能",
+                crate::status::on_off(self.cr & (1 << 7) != 0).to_string(),
+            ),
+            ("计数器", format!("{}", self.counter)),
+            ("CR", crate::status::hex(self.cr)),
+            ("CFR", crate::status::hex(self.cfr)),
+        ]
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -347,29 +374,5 @@ mod tests {
                 .unwrap();
         }
         assert!(!wwdg.take_expired());
-    }
-}
-
-impl Iwdg {
-    /// Labelled state for the peripheral status browser.
-    pub fn status(&self, _clocks: &gsim_core::Clocks) -> Vec<(&'static str, String)> {
-        vec![
-            ("运行", crate::status::on_off(self.running).to_string()),
-            ("计数器", format!("{}", self.counter)),
-            ("重装值", format!("{}", self.rlr & 0xFFF)),
-            ("超时周期", format!("{} 个 LSI 周期", self.reload_cycles())),
-        ]
-    }
-}
-
-impl Wwdg {
-    /// Labelled state for the peripheral status browser.
-    pub fn status(&self, _clocks: &gsim_core::Clocks) -> Vec<(&'static str, String)> {
-        vec![
-            ("使能", crate::status::on_off(self.cr & (1 << 7) != 0).to_string()),
-            ("计数器", format!("{}", self.counter)),
-            ("CR", crate::status::hex(self.cr)),
-            ("CFR", crate::status::hex(self.cfr)),
-        ]
     }
 }

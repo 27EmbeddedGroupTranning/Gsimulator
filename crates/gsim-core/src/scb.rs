@@ -267,6 +267,31 @@ impl Scb {
     }
 }
 
+impl Scb {
+    /// Labelled state for the peripheral status browser.
+    pub fn status(&self, _clocks: &crate::Clocks) -> Vec<(&'static str, String)> {
+        let group = match self.prigroup() {
+            0 => "0 位（7 位抢占）",
+            1 => "1 位",
+            2 => "2 位",
+            3 => "3 位",
+            4 => "4 位",
+            5 => "5 位",
+            6 => "6 位",
+            _ => "7 位（无抢占）",
+        };
+        vec![
+            ("CPUID", format!("0x{:08X}", self.cpuid())),
+            ("优先级分组", group.to_string()),
+            ("AIRCR", format!("0x{:08X}", self.aircr)),
+            ("SHCSR", format!("0x{:08X}", self.shcsr)),
+            ("CFSR", format!("0x{:08X}", self.cfsr)),
+            ("HFSR", format!("0x{:08X}", self.hfsr)),
+            ("向量表", format!("0x{:08X}", self.vtor)),
+        ]
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -335,30 +360,5 @@ mod tests {
         scb.write_reg(0x23, AccessWidth::Byte, 0xE0, &mut nvic)
             .unwrap();
         assert_eq!(nvic.system_priority(exception::SYSTICK), 0xE0);
-    }
-}
-
-impl Scb {
-    /// Labelled state for the peripheral status browser.
-    pub fn status(&self, _clocks: &crate::Clocks) -> Vec<(&'static str, String)> {
-        let group = match self.prigroup() {
-            0 => "0 位（7 位抢占）",
-            1 => "1 位",
-            2 => "2 位",
-            3 => "3 位",
-            4 => "4 位",
-            5 => "5 位",
-            6 => "6 位",
-            _ => "7 位（无抢占）",
-        };
-        vec![
-            ("CPUID", format!("0x{:08X}", self.cpuid())),
-            ("优先级分组", group.to_string()),
-            ("AIRCR", format!("0x{:08X}", self.aircr)),
-            ("SHCSR", format!("0x{:08X}", self.shcsr)),
-            ("CFSR", format!("0x{:08X}", self.cfsr)),
-            ("HFSR", format!("0x{:08X}", self.hfsr)),
-            ("向量表", format!("0x{:08X}", self.vtor)),
-        ]
     }
 }

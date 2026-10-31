@@ -63,8 +63,21 @@ fn the_stimulus_toggle_switches_the_square_wave_off() {
         });
 
     harness.run_steps(2);
-    // Once in the toolbar, once as the status section heading.
-    assert_eq!(harness.query_all_by_label("内置激励").count(), 2);
+    // Nothing drives the pins yet: only the toolbar switch exists, and no
+    // "idle source" line is shown in the status panel.
+    assert_eq!(harness.query_all_by_label("内置激励").count(), 1);
+    assert!(harness.query_by_label_contains("没有引脚驱动源").is_none());
+
+    harness
+        .get(By::new().label("内置激励").role(Role::Button))
+        .click();
+    harness.run_steps(2);
+
+    assert_eq!(
+        harness.query_all_by_label("内置激励").count(),
+        2,
+        "the status section appears while the stimulus runs"
+    );
 
     harness
         .get(By::new().label("内置激励").role(Role::Button))
@@ -76,12 +89,7 @@ fn the_stimulus_toggle_switches_the_square_wave_off() {
         1,
         "the status section must disappear, only the toggle button stays"
     );
-    assert!(harness
-        .query_by_label_contains("没有引脚驱动源")
-        .is_some());
-    assert!(harness
-        .query_by_label_contains("内置激励：PA5")
-        .is_none());
+    assert!(harness.query_by_label_contains("内置激励：PA5").is_none());
 
     // The simulation clock is not tied to the stimulus: it keeps running.
     let stop = app.borrow().as_ref().expect("app").sim_time_ns();

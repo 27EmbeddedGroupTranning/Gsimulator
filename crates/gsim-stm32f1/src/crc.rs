@@ -163,6 +163,26 @@ impl DbgMcu {
 
 crate::impl_peripheral!(DbgMcu, "DBGMCU");
 
+impl Crc {
+    /// Labelled state for the peripheral status browser.
+    pub fn status(&self, _clocks: &gsim_core::Clocks) -> Vec<(&'static str, String)> {
+        vec![
+            ("数据寄存器", crate::status::hex(self.dr)),
+            ("IDR", crate::status::hex(0x00A4_5C12)),
+        ]
+    }
+}
+
+impl DbgMcu {
+    /// Labelled state for the peripheral status browser.
+    pub fn status(&self, _clocks: &gsim_core::Clocks) -> Vec<(&'static str, String)> {
+        vec![
+            ("IDCODE", crate::status::hex(0x2003_6410)),
+            ("CR", crate::status::hex(self.cr)),
+        ]
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -214,25 +234,5 @@ mod tests {
             dbg.read_reg(&cx, dreg::IDCODE, AccessWidth::Word).unwrap(),
             0x2003_6410
         );
-    }
-}
-
-impl Crc {
-    /// Labelled state for the peripheral status browser.
-    pub fn status(&self, _clocks: &gsim_core::Clocks) -> Vec<(&'static str, String)> {
-        vec![
-            ("数据寄存器", crate::status::hex(self.dr)),
-            ("IDR", crate::status::hex(0x00A4_5C12)),
-        ]
-    }
-}
-
-impl DbgMcu {
-    /// Labelled state for the peripheral status browser.
-    pub fn status(&self, _clocks: &gsim_core::Clocks) -> Vec<(&'static str, String)> {
-        vec![
-            ("IDCODE", crate::status::hex(0x2003_6410)),
-            ("CR", crate::status::hex(self.cr)),
-        ]
     }
 }

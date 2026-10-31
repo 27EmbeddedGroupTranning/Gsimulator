@@ -439,6 +439,38 @@ pub fn base_irq(controller: u8) -> u16 {
     }
 }
 
+impl Dma {
+    /// Labelled state for the peripheral status browser.
+    pub fn status(&self, _clocks: &gsim_core::Clocks) -> Vec<(&'static str, String)> {
+        let enabled = self
+            .channels
+            .iter()
+            .filter(|channel| channel.ccr & 1 != 0)
+            .count();
+        let mut rows = vec![
+            ("通道数", format!("{}", self.channels.len())),
+            ("已使能", format!("{enabled}")),
+        ];
+        for (index, channel) in self.channels.iter().enumerate() {
+            if channel.ccr & 1 == 0 {
+                continue;
+            }
+            const NAMES: [&str; 7] = [
+                "通道 1", "通道 2", "通道 3", "通道 4", "通道 5", "通道 6", "通道 7",
+            ];
+            let name = NAMES.get(index).copied().unwrap_or("通道");
+            rows.push((
+                name,
+                format!(
+                    "剩余 {} 次  0x{:08X} → 0x{:08X}",
+                    channel.cndtr, channel.cpar, channel.cmar
+                ),
+            ));
+        }
+        rows
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -577,37 +609,5 @@ mod tests {
         assert_eq!(Request::Spi1Tx.route(), (0, 2));
         assert_eq!(Request::Tim2Up.route(), (0, 1));
         assert_eq!(Request::I2c1Tx.route(), (0, 5));
-    }
-}
-
-impl Dma {
-    /// Labelled state for the peripheral status browser.
-    pub fn status(&self, _clocks: &gsim_core::Clocks) -> Vec<(&'static str, String)> {
-        let enabled = self
-            .channels
-            .iter()
-            .filter(|channel| channel.ccr & 1 != 0)
-            .count();
-        let mut rows = vec![
-            ("通道数", format!("{}", self.channels.len())),
-            ("已使能", format!("{enabled}")),
-        ];
-        for (index, channel) in self.channels.iter().enumerate() {
-            if channel.ccr & 1 == 0 {
-                continue;
-            }
-            const NAMES: [&str; 7] = [
-                "通道 1", "通道 2", "通道 3", "通道 4", "通道 5", "通道 6", "通道 7",
-            ];
-            let name = NAMES.get(index).copied().unwrap_or("通道");
-            rows.push((
-                name,
-                format!(
-                    "剩余 {} 次  0x{:08X} → 0x{:08X}",
-                    channel.cndtr, channel.cpar, channel.cmar
-                ),
-            ));
-        }
-        rows
     }
 }

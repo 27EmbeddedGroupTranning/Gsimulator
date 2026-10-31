@@ -153,6 +153,19 @@ impl Exti {
 
 crate::impl_peripheral!(Exti, "EXTI");
 
+impl Exti {
+    /// Labelled state for the peripheral status browser.
+    pub fn status(&self, _clocks: &gsim_core::Clocks) -> Vec<(&'static str, String)> {
+        vec![
+            ("中断屏蔽 IMR", crate::status::hex(self.imr)),
+            ("事件屏蔽 EMR", crate::status::hex(self.emr)),
+            ("上升沿 RTSR", crate::status::hex(self.rtsr)),
+            ("下降沿 FTSR", crate::status::hex(self.ftsr)),
+            ("挂起 PR", crate::status::hex(self.pr)),
+        ]
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -244,18 +257,5 @@ mod tests {
         levels[0] = true;
         exti.update(&cx, &levels);
         assert_eq!(exti.pending(), 0, "IMR is clear so nothing latches");
-    }
-}
-
-impl Exti {
-    /// Labelled state for the peripheral status browser.
-    pub fn status(&self, _clocks: &gsim_core::Clocks) -> Vec<(&'static str, String)> {
-        vec![
-            ("中断屏蔽 IMR", crate::status::hex(self.imr)),
-            ("事件屏蔽 EMR", crate::status::hex(self.emr)),
-            ("上升沿 RTSR", crate::status::hex(self.rtsr)),
-            ("下降沿 FTSR", crate::status::hex(self.ftsr)),
-            ("挂起 PR", crate::status::hex(self.pr)),
-        ]
     }
 }

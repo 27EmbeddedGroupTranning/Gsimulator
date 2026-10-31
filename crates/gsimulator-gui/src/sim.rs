@@ -20,13 +20,13 @@ use std::rc::Rc;
 use gsim_core::{AccessWidth, Clocks, Event, MemoryBus};
 use gsim_cpu::{Cpu, CpuError, ElfImage, RunError, StopReason};
 use gsim_devices::{
-    BusRecord, CanBus, CanBusStats, CanTransceiver, ChipState, Max7219, TransceiverMode,
-    TransceiverStats,
+    BusRecord, CanBus, CanBusStats, CanTransceiver, ChipState, Max7219, PeerStats, ScopeSample,
+    TransceiverMode, TransceiverStats,
 };
 use gsim_stm32f1::status::PeripheralStatus;
 use gsim_stm32f1::{map, Soc, Stats};
 
-use crate::board::PinLevels;
+use crate::board::{CanNetwork, Crystals, PinLevels};
 use crate::waveform::Expression;
 
 /// Default half period of the built-in square wave (50 % duty).
@@ -219,6 +219,18 @@ pub struct CanSnapshot {
     pub node: u32,
     pub node_name: String,
     pub pending: usize,
+    /// Topology of the pair on the drawing: terminators and probes.
+    pub network: CanNetwork,
+    /// Electrical quality derived from the termination network.
+    pub quality: f64,
+    /// Duration of one bit on the wire.
+    pub bit_ns: u64,
+    /// Bit level nodes attached to the wire, with their counters.
+    pub peers: Vec<(String, PeerStats)>,
+    /// Last error frame signalled on the wire, already formatted.
+    pub last_error: Option<String>,
+    /// Last frame that lost an arbitration round.
+    pub last_arbitration: Option<String>,
 }
 
 impl CanSnapshot {
@@ -228,6 +240,19 @@ impl CanSnapshot {
     pub fn observe(&mut self, bus: &CanBus, transceiver: Option<&CanTransceiver>) {
         self.records = bus.records().iter().cloned().collect();
         self.bus = bus.stats();
+        self.quality = bus.quality();
+        self.bit_ns = bus.bit_time();
+        self.peers = bus
+            .peers()
+            .iter()
+            .map(|peer| (peer.name().to_string(), peer.stats()))
+            .collect();
+        self.last_error = bus
+            .last_error()
+            .map(|(node, kind)| format!("节点 {node}：{}", kind.label()));
+        self.last_arbitration = bus
+            .last_arbitration()
+            .map(|(node, frame)| format!("节点 {node} 输给 {}", frame.id_label()));
         match transceiver {
             Some(transceiver) => {
                 self.transceiver = transceiver.stats();
@@ -258,6 +283,41 @@ impl Default for CanSnapshot {
             node: 0,
             node_name: String::new(),
             pending: 0,
+            network: CanNetwork::default(),
+            quality: 1.0,
+            bit_ns: 0,
+            peers: Vec::new(),
+            last_error: None,
+            last_arbitration: None,
+        }
+    }
+}
+
+/// One oscilloscope placed on the drawing, ready to be plotted.
+#[derive(Clone, Debug, Default)]
+pub struct ScopeView {
+    pub name: String,
+    /// Width of the on screen window.
+    pub window_ns: u64,
+    /// Stored samples, oldest first.
+    pub samples: Vec<ScopeSample>,
+    pub frozen: bool,
+    /// Samples the wire could not carry cleanly.
+    pub glitches: u64,
+    /// Peak differential voltage of the trace.
+    pub peak: f32,
+}
+
+impl ScopeView {
+    /// Copies the state of one probe.
+    pub fn of(scope: &gsim_devices::Oscilloscope) -> Self {
+        ScopeView {
+            name: scope.name().to_string(),
+            window_ns: scope.window_ns(),
+            samples: scope.samples().iter().copied().collect(),
+            frozen: scope.frozen(),
+            glitches: scope.glitches(),
+            peak: scope.peak_differential(),
         }
     }
 }
@@ -283,6 +343,8 @@ pub struct Snapshot {
     pub peripherals: Vec<PeripheralStatus>,
     pub matrix: MatrixSnapshot,
     pub can: CanSnapshot,
+    /// Oscilloscopes placed on the drawing.
+    pub scopes: Vec<ScopeView>,
 }
 
 impl Snapshot {
@@ -344,12 +406,14 @@ impl Simulation {
         let matrix = None;
         let event_clock_ns = Rc::new(Cell::new(0u64));
 
-        let mut simulation = Simulation {
+        Simulation {
             soc,
             cpu: None,
             image: None,
             source: Source::Idle,
-            running: false,
+            // Nothing is loaded yet, but the simulation clock itself is live;
+            // the toolbar's 内置激励 switch (or a firmware ELF) adds a driver.
+            running: true,
             halt: None,
             uart,
             stimulus: StimulusConfig::default(),
@@ -359,9 +423,7 @@ impl Simulation {
             matrix,
             event_clock_ns,
             events,
-        };
-        simulation.start_stimulus();
-        simulation
+        }
     }
 
     pub fn source(&self) -> &Source {
@@ -371,6 +433,31 @@ impl Simulation {
     /// Current stimulus settings, whether or not it is running.
     pub fn stimulus(&self) -> &StimulusConfig {
         &self.stimulus
+    }
+
+    /// True while the HSE oscillator is running (crystal fitted and started by
+    /// the firmware).
+    pub fn hse_ready(&self) -> bool {
+        self.soc.borrow().hse_ready()
+    }
+
+    /// True while the 32.768 kHz LSE oscillator is running.
+    pub fn lse_ready(&self) -> bool {
+        self.soc.borrow().lse_ready()
+    }
+
+    /// Tells the SoC which crystals are soldered to the oscillator pins.
+    ///
+    /// A firmware that enables `HSEON`/`LSEON` only sees the ready flag when
+    /// the matching crystal is present; which one it uses is its own choice.
+    pub fn set_crystals(&mut self, crystals: Crystals) {
+        self.with_soc(|soc| {
+            if let Some(hz) = crystals.hse_hz {
+                soc.set_hse_hz(hz);
+            }
+            soc.set_hse_present(crystals.hse_hz.is_some());
+            soc.set_lse_present(crystals.lse);
+        });
     }
 
     /// Replaces the stimulus settings.
@@ -690,6 +777,53 @@ impl Simulation {
         self.soc.borrow_mut().can_receive(usize::from(unit), frame);
     }
 
+    /// Bit time of the CAN controller in nanoseconds (`0` when it has no clock).
+    pub fn can_bit_ns(&self, unit: u8) -> u64 {
+        self.soc.borrow().can_bit_time_ns(usize::from(unit))
+    }
+
+    /// Level the CAN transmitter drives on `CAN_TX`, `None` when released.
+    pub fn can_driven_level(&self, unit: u8) -> Option<bool> {
+        self.soc.borrow().can_driven_level(usize::from(unit))
+    }
+
+    /// `true` when the controller clocks its own bits (loopback/silent mode).
+    pub fn can_self_clocked(&self, unit: u8) -> bool {
+        self.soc.borrow().can_self_clocked(usize::from(unit))
+    }
+
+    /// Tells the CAN controller whether a bus drives its bit clock.
+    pub fn can_set_on_bus(&mut self, unit: u8, on_bus: bool) {
+        self.event_clock_ns.set(self.now_ns());
+        self.soc
+            .borrow_mut()
+            .can_set_on_bus(usize::from(unit), on_bus);
+    }
+
+    /// Feeds one sampled bit time of the wire into the CAN receiver.
+    pub fn can_sample_bit(&mut self, unit: u8, level: bool) {
+        self.event_clock_ns.set(self.now_ns());
+        self.soc
+            .borrow_mut()
+            .can_sample_bit(usize::from(unit), level);
+    }
+
+    /// Simulated time `instructions` instructions take at the current clock.
+    pub fn ns_for(&self, instructions: u32) -> u64 {
+        self.budget_ns(instructions)
+    }
+
+    /// Runs until simulated time reaches `target_ns`, in chunks of `chunk`
+    /// instructions, so the caller can inject a wire level between bits.
+    pub fn run_until_ns(&mut self, target_ns: u64, chunk: u32) {
+        let chunk = chunk.max(1);
+        let mut guard = 0;
+        while self.running && self.now_ns() < target_ns && guard < 100_000 {
+            self.step_once(chunk);
+            guard += 1;
+        }
+    }
+
     /// Pushes the external devices one step forward: primes the `MISO` line of
     /// the wired LED matrix so the core reads back what the chain shifts out.
     fn advance_devices(&mut self) {
@@ -815,7 +949,7 @@ impl Simulation {
             .into_iter()
             .collect::<Vec<_>>();
         let source_label = match &self.source {
-            Source::Idle => "空闲：没有引脚驱动源（时钟照常推进）".to_string(),
+            Source::Idle => "空闲".to_string(),
             Source::Stimulus => self.stimulus.label(),
             Source::Firmware(path) => format!(
                 "固件：{}",
@@ -850,6 +984,7 @@ impl Simulation {
                 controller,
                 ..CanSnapshot::default()
             },
+            scopes: Vec::new(),
         }
     }
 }

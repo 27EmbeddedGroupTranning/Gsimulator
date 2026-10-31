@@ -343,6 +343,56 @@ impl Usart {
 
 crate::impl_peripheral!(Usart, "USART");
 
+impl Usart {
+    /// Labelled state for the peripheral status browser.
+    pub fn status(&self, clocks: &gsim_core::Clocks) -> Vec<(&'static str, String)> {
+        let pclk = if self.index == 0 {
+            clocks.pclk2_hz
+        } else {
+            clocks.pclk1_hz
+        };
+        let baud = if self.brr >= 16 { pclk / self.brr } else { 0 };
+        let mut flags = Vec::new();
+        if self.tx_buffer.is_some() || self.shift.is_some() {
+            flags.push("发送中");
+        }
+        if self.tc {
+            flags.push("发送完成");
+        }
+        if self.rxne {
+            flags.push("收到字节");
+        }
+        if self.overrun {
+            flags.push("溢出");
+        }
+        vec![
+            (
+                "使能",
+                crate::status::on_off(self.cr1 & (1 << 13) != 0).to_string(),
+            ),
+            (
+                "发送",
+                crate::status::on_off(self.cr1 & (1 << 3) != 0).to_string(),
+            ),
+            (
+                "接收",
+                crate::status::on_off(self.cr1 & (1 << 2) != 0).to_string(),
+            ),
+            ("波特率", crate::status::hz(baud)),
+            ("BRR", crate::status::hex(self.brr)),
+            (
+                "状态",
+                if flags.is_empty() {
+                    "空闲".to_string()
+                } else {
+                    flags.join("，")
+                },
+            ),
+            ("最近接收", format!("0x{:02X}", self.rx_data)),
+        ]
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -460,46 +510,5 @@ mod tests {
             uart.read_reg(&cx, reg::SR, AccessWidth::Word).unwrap() & sr::RXNE,
             0
         );
-    }
-}
-
-impl Usart {
-    /// Labelled state for the peripheral status browser.
-    pub fn status(&self, clocks: &gsim_core::Clocks) -> Vec<(&'static str, String)> {
-        let pclk = if self.index == 0 {
-            clocks.pclk2_hz
-        } else {
-            clocks.pclk1_hz
-        };
-        let baud = if self.brr >= 16 { pclk / self.brr } else { 0 };
-        let mut flags = Vec::new();
-        if self.tx_buffer.is_some() || self.shift.is_some() {
-            flags.push("发送中");
-        }
-        if self.tc {
-            flags.push("发送完成");
-        }
-        if self.rxne {
-            flags.push("收到字节");
-        }
-        if self.overrun {
-            flags.push("溢出");
-        }
-        vec![
-            ("使能", crate::status::on_off(self.cr1 & (1 << 13) != 0).to_string()),
-            ("发送", crate::status::on_off(self.cr1 & (1 << 3) != 0).to_string()),
-            ("接收", crate::status::on_off(self.cr1 & (1 << 2) != 0).to_string()),
-            ("波特率", crate::status::hz(baud)),
-            ("BRR", crate::status::hex(self.brr)),
-            (
-                "状态",
-                if flags.is_empty() {
-                    "空闲".to_string()
-                } else {
-                    flags.join("，")
-                },
-            ),
-            ("最近接收", format!("0x{:02X}", self.rx_data)),
-        ]
     }
 }

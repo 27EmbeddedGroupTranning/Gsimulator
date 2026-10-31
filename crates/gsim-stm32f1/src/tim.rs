@@ -569,6 +569,47 @@ impl Tim {
 
 crate::impl_peripheral!(Tim, "TIM");
 
+impl Tim {
+    /// Labelled state for the peripheral status browser.
+    pub fn status(&self, clocks: &gsim_core::Clocks) -> Vec<(&'static str, String)> {
+        let clock = if self.index == 0 {
+            clocks.tim1_hz
+        } else {
+            clocks.tim2_hz
+        };
+        let tick = clock / (self.psc + 1);
+        let mut channels = 0;
+        for channel in 0..4 {
+            if self.ccer & (1 << (channel * 4)) != 0 {
+                channels += 1;
+            }
+        }
+        vec![
+            ("使能", crate::status::on_off(self.cr1 & 1 != 0).to_string()),
+            (
+                "计数方向",
+                if self.cr1 & (1 << 4) != 0 {
+                    "向下"
+                } else {
+                    "向上"
+                }
+                .to_string(),
+            ),
+            ("计数频率", crate::status::hz(tick)),
+            ("PSC", format!("{}", self.psc)),
+            ("ARR", format!("{}", self.arr)),
+            ("CNT", format!("{}", self.cnt)),
+            (
+                "比较通道",
+                format!(
+                    "{channels} 个输出（CCR1..4 = {} {} {} {}）",
+                    self.ccr[0], self.ccr[1], self.ccr[2], self.ccr[3]
+                ),
+            ),
+        ]
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -703,41 +744,5 @@ mod tests {
             tim.read_reg(&cx, reg::SR, AccessWidth::Word).unwrap() & sr::UIF,
             0
         );
-    }
-}
-
-impl Tim {
-    /// Labelled state for the peripheral status browser.
-    pub fn status(&self, clocks: &gsim_core::Clocks) -> Vec<(&'static str, String)> {
-        let clock = if self.index == 0 {
-            clocks.tim1_hz
-        } else {
-            clocks.tim2_hz
-        };
-        let tick = clock / (self.psc + 1);
-        let mut channels = 0;
-        for channel in 0..4 {
-            if self.ccer & (1 << (channel * 4)) != 0 {
-                channels += 1;
-            }
-        }
-        vec![
-            ("使能", crate::status::on_off(self.cr1 & 1 != 0).to_string()),
-            (
-                "计数方向",
-                if self.cr1 & (1 << 4) != 0 { "向下" } else { "向上" }.to_string(),
-            ),
-            ("计数频率", crate::status::hz(tick)),
-            ("PSC", format!("{}", self.psc)),
-            ("ARR", format!("{}", self.arr)),
-            ("CNT", format!("{}", self.cnt)),
-            (
-                "比较通道",
-                format!(
-                    "{channels} 个输出（CCR1..4 = {} {} {} {}）",
-                    self.ccr[0], self.ccr[1], self.ccr[2], self.ccr[3]
-                ),
-            ),
-        ]
     }
 }

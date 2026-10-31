@@ -14,6 +14,11 @@ use gsim_devices::TransceiverMode;
 
 use crate::sim::Snapshot;
 
+/// Bit error rate implied by the quality figure of the pair.
+fn bus_error_rate(quality: f64) -> f64 {
+    gsim_devices::bit_error_rate(quality)
+}
+
 /// Commands the window sends back to the application.
 #[derive(Clone, Debug, PartialEq)]
 pub enum CanAction {
@@ -23,6 +28,8 @@ pub enum CanAction {
     ClearLog,
     /// Change the electrical mode of the transceiver.
     SetMode(TransceiverMode),
+    /// Bring the oscilloscope window to the front.
+    OpenScope,
 }
 
 /// State of the CAN bus window.
@@ -92,6 +99,8 @@ impl CanBusWindow {
 
     fn body(&mut self, ui: &mut egui::Ui, snapshot: &Snapshot, action: &mut Option<CanAction>) {
         self.header(ui, snapshot, action);
+        ui.separator();
+        self.electrical_panel(ui, snapshot, action);
         ui.separator();
         self.controller_panel(ui, snapshot);
         ui.separator();
@@ -163,6 +172,118 @@ impl CanBusWindow {
                 );
             }
         });
+    }
+
+    /// The wire itself: termination, quality, arbitration and error counters.
+    fn electrical_panel(
+        &mut self,
+        ui: &mut egui::Ui,
+        snapshot: &Snapshot,
+        action: &mut Option<CanAction>,
+    ) {
+        let can = &snapshot.can;
+        let network = &can.network;
+        egui::CollapsingHeader::new("总线电气状态")
+            .default_open(true)
+            .show(ui, |ui| {
+                let rows = [
+                    (
+                        "终端电阻",
+                        crate::board::termination_label(network.termination_ohm),
+                    ),
+                    (
+                        "总线质量",
+                        format!(
+                            "{:.0}%{}",
+                            can.quality * 100.0,
+                            if can.quality > 0.99 {
+                                "（理想）"
+                            } else {
+                                ""
+                            }
+                        ),
+                    ),
+                    ("位时间", format!("{:.2} µs", can.bit_ns as f64 / 1000.0)),
+                    (
+                        "位错误率",
+                        format!("{:.3} %/位", bus_error_rate(can.quality) * 100.0),
+                    ),
+                    ("位传输", format!("{}", can.bus.bits)),
+                    ("尖峰（线路振铃）", format!("{}", can.bus.glitches)),
+                    ("仲裁失败", format!("{}", can.bus.arbitration_lost)),
+                    ("错误帧", format!("{}", can.bus.error_frames)),
+                    ("总线节点", format!("{} 个", network.nodes)),
+                    ("示波器", format!("{} 个", network.scopes.len())),
+                ];
+                egui::Grid::new("can-electrical-rows")
+                    .num_columns(4)
+                    .striped(true)
+                    .spacing([14.0, 3.0])
+                    .show(ui, |ui| {
+                        for (index, (label, value)) in rows.into_iter().enumerate() {
+                            ui.label(RichText::new(label).color(Color32::GRAY));
+                            ui.monospace(value);
+                            if index % 2 == 1 {
+                                ui.end_row();
+                            }
+                        }
+                        ui.end_row();
+                    });
+                ui.horizontal(|ui| {
+                    if let Some(note) = &can.last_error {
+                        ui.colored_label(
+                            Color32::from_rgb(230, 130, 120),
+                            format!("最近错误：{note}"),
+                        );
+                    }
+                    if let Some(note) = &can.last_arbitration {
+                        ui.colored_label(Color32::from_rgb(230, 190, 90), format!("仲裁：{note}"));
+                    }
+                    if ui
+                        .button("打开示波器")
+                        .on_hover_text("查看探头抓到的 CANH/CANL 波形")
+                        .clicked()
+                    {
+                        *action = Some(CanAction::OpenScope);
+                    }
+                });
+                if network.nodes == 0 {
+                    ui.label(
+                        RichText::new(
+                            "画布上没有接在 CANH/CANL 上的收发器：注入的帧上不了线，\
+                             把收发器的 CANH/CANL 接到终端电阻与探头上即可",
+                        )
+                        .small()
+                        .color(Color32::from_rgb(230, 190, 90)),
+                    );
+                } else if network.terminators.is_empty() {
+                    ui.label(
+                        RichText::new("总线没有终端电阻：线路会振铃，帧会被判 CRC/应答错误")
+                            .small()
+                            .color(Color32::from_rgb(230, 190, 90)),
+                    );
+                }
+                if !can.peers.is_empty() {
+                    egui::Grid::new("can-peer-rows")
+                        .num_columns(5)
+                        .striped(true)
+                        .spacing([14.0, 3.0])
+                        .show(ui, |ui| {
+                            for header in ["节点", "发送", "接收", "仲裁失败", "错误"] {
+                                ui.label(RichText::new(header).small().color(Color32::GRAY));
+                            }
+                            ui.end_row();
+                            for (name, stats) in &can.peers {
+                                ui.monospace(name);
+                                ui.monospace(format!("{}", stats.tx_frames));
+                                ui.monospace(format!("{}", stats.rx_frames));
+                                ui.monospace(format!("{}", stats.arbitration_lost));
+                                ui.monospace(format!("{}", stats.errors));
+                                ui.end_row();
+                            }
+                        });
+                }
+            });
     }
 
     fn controller_panel(&mut self, ui: &mut egui::Ui, snapshot: &Snapshot) {
@@ -323,7 +444,7 @@ fn parse_frame(
     }
     let mut data = Vec::new();
     for token in data_text
-        .split(|c: char| c == ' ' || c == ',' || c == '-')
+        .split([' ', ',', '-'])
         .filter(|token| !token.is_empty())
     {
         let cleaned = token.trim_start_matches("0x").trim_start_matches("0X");

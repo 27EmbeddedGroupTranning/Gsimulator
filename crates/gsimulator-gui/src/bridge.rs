@@ -21,6 +21,8 @@ use crate::board::{
     ENCODER_SW, MATRIX_CLK, MATRIX_CS, MATRIX_DIN, MATRIX_DOUT, UART_RX, UART_TX,
 };
 use crate::sim::Simulation;
+use gsim_core::can::DOMINANT;
+use gsim_devices::{ScopeSample, WireLevels};
 
 /// `TX` pin of USART1/2/3 on the F103 (default mapping, no remap).
 pub const USART_TX_PINS: [(u8, u8); 3] = [(0, 9), (0, 2), (1, 10)];
@@ -39,11 +41,11 @@ pub const SPI_MOSI_PINS: [(u8, u8); 3] = [(0, 7), (1, 15), (2, 12)];
 
 /// Bytes one terminal may push into the MCU per slice.
 const MAX_BYTES_PER_SLICE: usize = 1;
-/// Frames one transceiver may hand to the controller per slice.
-const MAX_CAN_FRAMES_PER_SLICE: usize = 4;
+/// Instructions the slice advance runs between two sampled CAN bits.
+const CAN_INSTRUCTION_CHUNK: u32 = 64;
 
 /// What the bridge did, mostly for tests and the status line.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct ServiceReport {
     /// Quadrature edges applied this slice.
     pub encoder_edges: u32,
@@ -51,6 +53,12 @@ pub struct ServiceReport {
     pub bytes_sent: usize,
     /// Frames handed to the CAN controller.
     pub can_frames: usize,
+    /// Bits the CAN wire carried this slice.
+    pub can_bits: u32,
+    /// Parallel termination of the pair, `None` when nothing terminates it.
+    pub termination_ohm: Option<f64>,
+    /// Electrical quality of the pair.
+    pub quality: f64,
     /// Events handed to a device.
     pub events_delivered: usize,
 }
@@ -170,8 +178,32 @@ impl Wiring {
 pub fn service(board: &mut Board, sim: &mut Simulation) -> ServiceReport {
     let events = sim.take_events();
     let now_ns = sim.now_ns();
+    let network = board.can_network();
     let wiring = Wiring::collect(board);
     let mut report = ServiceReport::default();
+
+    // The pair the transceivers sit on: its termination decides how clean the
+    // bits arrive, and a part that is not wired to the controller must not
+    // clock it.
+    let on_bus = wiring.iter().any(|entry| {
+        matches!(
+            entry.attach,
+            Attach::Can {
+                transmitting: true,
+                receiving: true,
+                ..
+            }
+        )
+    });
+    sim.can_set_on_bus(0, on_bus);
+    let bus_handle = board.can_bus();
+    {
+        let mut bus = bus_handle.borrow_mut();
+        bus.set_bit_time(sim.can_bit_ns(0));
+        bus.set_termination(network.termination_ohm);
+    }
+    report.termination_ohm = network.termination_ohm;
+    report.quality = network.quality();
 
     for entry in &wiring {
         let Some(device) = board
@@ -211,13 +243,7 @@ pub fn service(board: &mut Board, sim: &mut Simulation) -> ServiceReport {
                     }
                 }
             }
-            (
-                Hardware::Encoder(encoder),
-                Attach::Encoder {
-                    phases,
-                    button,
-                },
-            ) => {
+            (Hardware::Encoder(encoder), Attach::Encoder { phases, button }) => {
                 report.encoder_edges += encoder.poll(now_ns);
                 // The contacts hold their level: drive them even between
                 // edges, so the MCU reads the encoder state right away.
@@ -234,14 +260,11 @@ pub fn service(board: &mut Board, sim: &mut Simulation) -> ServiceReport {
                     sim.drive_pin(*pin, !encoder.button());
                 }
             }
-            (
-                Hardware::Can(transceiver),
-                Attach::Can {
-                    transmitting,
-                    receiving,
-                },
-            ) => {
+            (Hardware::Can(transceiver), Attach::Can { transmitting, .. }) => {
                 let mut transceiver = transceiver.borrow_mut();
+                // The controller is driven bit by bit from the wire, so the part
+                // only has to log what went out.
+                transceiver.set_bit_level(true);
                 // A part that is not wired to the controller sees nothing.
                 if *transmitting {
                     for event in &events {
@@ -249,24 +272,8 @@ pub fn service(board: &mut Board, sim: &mut Simulation) -> ServiceReport {
                         report.events_delivered += 1;
                     }
                 }
-                if *receiving {
-                    for _ in 0..MAX_CAN_FRAMES_PER_SLICE {
-                        let Some(frame) = transceiver.poll() else {
-                            break;
-                        };
-                        sim.receive_can(0, frame);
-                        report.can_frames += 1;
-                    }
-                }
             }
-            (
-                Hardware::Matrix(matrix),
-                Attach::Matrix {
-                    unit,
-                    cs,
-                    miso: _,
-                },
-            ) => {
+            (Hardware::Matrix(matrix), Attach::Matrix { unit, cs, miso: _ }) => {
                 let (Some(unit), Some(cs)) = (*unit, *cs) else {
                     continue;
                 };
@@ -317,8 +324,64 @@ pub fn run_frame(
         report.encoder_edges += partial.encoder_edges;
         report.bytes_sent += partial.bytes_sent;
         report.can_frames += partial.can_frames;
+        report.can_bits += advance_slice(board, sim, per_slice);
+        report.termination_ohm = partial.termination_ohm;
+        report.quality = partial.quality;
         report.events_delivered += partial.events_delivered;
-        sim.advance_frame(per_slice);
     }
     report
+}
+
+/// Advances one slice of simulated time, and when a transceiver is really on
+/// the pair, steps the wire one bit at a time so the controller sees the level
+/// of every single bit.
+fn advance_slice(board: &mut Board, sim: &mut Simulation, instructions: u32) -> u32 {
+    let network = board.can_network();
+    let wired = network.nodes > 0;
+    if !wired {
+        sim.advance_frame(instructions);
+        return 0;
+    }
+    // A controller in loopback (or silent) mode clocks itself: it is not on
+    // the wire, but the other nodes and the probes still are.
+    let on_wire = !sim.can_self_clocked(0);
+    let bus = board.can_bus();
+    let bit_ns = sim.can_bit_ns(0).max(1);
+    let quality = network.quality();
+    let scopes = network.scopes.clone();
+    let target_ns = sim.now_ns().saturating_add(sim.ns_for(instructions));
+    let mut bits = 0;
+    let mut guard = 0;
+    while sim.is_running() && sim.now_ns() < target_ns && guard < 4096 {
+        guard += 1;
+        sim.run_until_ns(sim.now_ns().saturating_add(bit_ns), CAN_INSTRUCTION_CHUNK);
+        let now_ns = sim.now_ns();
+        let driven = if on_wire {
+            sim.can_driven_level(0)
+        } else {
+            None
+        };
+        let level = {
+            let mut bus = bus.borrow_mut();
+            bus.step(driven, now_ns)
+        };
+        let glitch = bus.borrow().last_glitch();
+        if on_wire {
+            sim.can_sample_bit(0, level);
+        }
+        let levels = WireLevels::of(level);
+        let ringing = ((1.0 - quality) * 0.9) as f32;
+        let sample = ScopeSample {
+            time_ns: now_ns,
+            can_h: levels.can_h + ringing,
+            can_l: levels.can_l - ringing,
+            dominant: level == DOMINANT,
+            glitch,
+        };
+        for scope in &scopes {
+            scope.borrow_mut().record(sample);
+        }
+        bits += 1;
+    }
+    bits
 }

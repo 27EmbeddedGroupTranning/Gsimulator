@@ -376,7 +376,10 @@ fn tokenize(source: &str) -> Result<Vec<Token>, String> {
                 if followed_by_equals(&mut chars) {
                     Token::Eq
                 } else {
-                    return Err(format!("单个 '=' 不是比较运算符，请用 '=='（位置 {}）", index + 1));
+                    return Err(format!(
+                        "单个 '=' 不是比较运算符，请用 '=='（位置 {}）",
+                        index + 1
+                    ));
                 }
             }
             '!' => {
@@ -403,10 +406,7 @@ fn tokenize(source: &str) -> Result<Vec<Token>, String> {
                 }
             }
             other => {
-                return Err(format!(
-                    "无法识别的字符 {other:?}（位置 {}）",
-                    index + 1
-                ));
+                return Err(format!("无法识别的字符 {other:?}（位置 {}）", index + 1));
             }
         };
         tokens.push(token);
@@ -554,8 +554,8 @@ impl Parser {
             Some(Token::Number(value)) => Ok(Node::Number(value)),
             Some(Token::Ident(name)) => {
                 if self.eat(&Token::LParen) {
-                    let function = Function::from_name(&name)
-                        .ok_or_else(|| format!("未知的函数 {name}"))?;
+                    let function =
+                        Function::from_name(&name).ok_or_else(|| format!("未知的函数 {name}"))?;
                     let mut args = Vec::new();
                     if !self.eat(&Token::RParen) {
                         loop {
@@ -597,7 +597,9 @@ mod tests {
     use super::Expression;
 
     fn eval(source: &str, t: f64) -> f64 {
-        Expression::parse(source).expect("expression must parse").eval(t)
+        Expression::parse(source)
+            .expect("expression must parse")
+            .eval(t)
     }
 
     #[test]

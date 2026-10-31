@@ -131,6 +131,27 @@ impl SysTick {
     }
 }
 
+impl SysTick {
+    /// Labelled state for the peripheral status browser.
+    pub fn status(&self, clocks: &crate::Clocks) -> Vec<(&'static str, String)> {
+        let tick_hz = if self.load > 0 {
+            clocks.hclk_hz / (self.load + 1)
+        } else {
+            0
+        };
+        vec![
+            ("使能", if self.enabled() { "开" } else { "关" }.to_string()),
+            ("重装值", format!("{}", self.load)),
+            ("当前值", format!("{}", self.current())),
+            (
+                "计数标志",
+                if self.count_flag { "1" } else { "0" }.to_string(),
+            ),
+            ("中断频率", format!("{tick_hz} Hz")),
+        ]
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -185,23 +206,5 @@ mod tests {
             }
         );
         assert_eq!(st.current(), 0);
-    }
-}
-
-impl SysTick {
-    /// Labelled state for the peripheral status browser.
-    pub fn status(&self, clocks: &crate::Clocks) -> Vec<(&'static str, String)> {
-        let tick_hz = if self.load > 0 {
-            clocks.hclk_hz / (self.load + 1)
-        } else {
-            0
-        };
-        vec![
-            ("使能", if self.enabled() { "开" } else { "关" }.to_string()),
-            ("重装值", format!("{}", self.load)),
-            ("当前值", format!("{}", self.current())),
-            ("计数标志", if self.count_flag { "1" } else { "0" }.to_string()),
-            ("中断频率", format!("{tick_hz} Hz")),
-        ]
     }
 }

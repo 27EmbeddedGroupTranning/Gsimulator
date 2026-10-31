@@ -190,16 +190,22 @@ impl ElfImage {
         self.symbols.iter().find(|symbol| symbol.name == name)
     }
 
-    /// Finds the closest function symbol at or below `address`.
+    /// Finds the function symbol that contains `address`.
+    ///
+    /// Thumb function symbols carry bit 0 set in `st_value`, so the comparison
+    /// ignores that bit; without it the byte just before a function would be
+    /// attributed to the previous function.
     pub fn function_at(&self, address: u32) -> Option<&Symbol> {
+        let address = address & !1;
         self.symbols
             .iter()
             .filter(|symbol| symbol.kind == SymbolKind::Function)
             .filter(|symbol| {
+                let start = symbol.address & !1;
                 let size = symbol.size.max(1);
-                (symbol.address..symbol.address + size).contains(&address)
+                (start..start.saturating_add(size)).contains(&address)
             })
-            .max_by_key(|symbol| symbol.address)
+            .max_by_key(|symbol| symbol.address & !1)
     }
 
     /// Total number of bytes the image occupies.

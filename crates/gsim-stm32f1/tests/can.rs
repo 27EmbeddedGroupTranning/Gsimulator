@@ -4,7 +4,7 @@
 mod common;
 
 use common::*;
-use gsim_core::can::CanDirection;
+use gsim_core::can::{CanDirection, FrameDecoder, RxStep, DOMINANT, RECESSIVE};
 use gsim_core::{AccessWidth, Event, MemoryBus};
 use gsim_stm32f1::map;
 
@@ -17,6 +17,8 @@ const MCR_RFLM: u32 = 1 << 3;
 const MSR_INAK: u32 = 1 << 0;
 const TSR_TME0: u32 = 1 << 26;
 const TSR_TXOK0: u32 = 1 << 1;
+const TSR_ALST0: u32 = 1 << 2;
+const TSR_TERR0: u32 = 1 << 3;
 const TSR_RQCP0: u32 = 1 << 0;
 const RF_FMP: u32 = 0b11;
 const RF_FULL: u32 = 1 << 2;
@@ -69,15 +71,15 @@ fn send(soc: &mut gsim_stm32f1::Soc, id: u32, data: &[u8]) {
         high |= u32::from(*data.get(index + 4).unwrap_or(&0)) << (index * 8);
     }
     w32(soc, BASE + map::can::TX_BASE, id << 21);
-    w32(soc, BASE + map::can::TX_BASE + map::can::TDTR, data.len() as u32);
+    w32(
+        soc,
+        BASE + map::can::TX_BASE + map::can::TDTR,
+        data.len() as u32,
+    );
     w32(soc, BASE + map::can::TX_BASE + map::can::TDHR, high);
     w32(soc, BASE + map::can::TX_BASE + map::can::TDLR, low);
     // TXRQ is the last write, exactly like the HAL does.
-    w32(
-        soc,
-        BASE + map::can::TX_BASE,
-        (id << 21) | 1,
-    );
+    w32(soc, BASE + map::can::TX_BASE, (id << 21) | 1);
 }
 
 /// `HAL_CAN_GetRxMessage` for FIFO0.
@@ -149,7 +151,10 @@ fn loopback_frame_is_received_after_its_wire_time() {
     )));
     assert_eq!(r32(&mut soc, BASE + map::can::RF0R) & RF_FMP, 1);
     let tsr = r32(&mut soc, BASE + map::can::TSR);
-    assert_eq!(tsr & (TSR_RQCP0 | TSR_TXOK0 | TSR_TME0), TSR_RQCP0 | TSR_TXOK0 | TSR_TME0);
+    assert_eq!(
+        tsr & (TSR_RQCP0 | TSR_TXOK0 | TSR_TME0),
+        TSR_RQCP0 | TSR_TXOK0 | TSR_TME0
+    );
 
     let (id, dlc, data) = receive(&mut soc);
     assert_eq!(id, 0x123);
@@ -233,6 +238,23 @@ fn aborting_a_mailbox_frees_it_and_counts_the_frame() {
     assert_eq!(soc.can.stats().aborted, 1);
 }
 
+/// Drives the pair the way a second node would: it acknowledges every frame it
+/// decodes but never starts one, and the controller samples what the wire
+/// settled to.
+fn acknowledge_every_frame(soc: &mut gsim_stm32f1::Soc, bits: u32) {
+    soc.can_set_on_bus(0, true);
+    let mut decoder = FrameDecoder::new();
+    let mut ack = false;
+    for _ in 0..bits {
+        let dominant = soc.can_driven_level(0) == Some(DOMINANT) || ack;
+        let level = if dominant { DOMINANT } else { RECESSIVE };
+        ack = matches!(decoder.feed(level), RxStep::CrcDelimiter { ok: true });
+        soc.can_sample_bit(0, level);
+        soc.advance_ns(5_000);
+    }
+    soc.can_set_on_bus(0, false);
+}
+
 #[test]
 fn normal_mode_reports_frames_on_the_transmit_pin() {
     let mut soc = gsim_stm32f1::Soc::new();
@@ -242,7 +264,7 @@ fn normal_mode_reports_frames_on_the_transmit_pin() {
     w32(&mut soc, BASE + map::can::IER, IER_TMEIE);
 
     send(&mut soc, 0x123, b"Hello");
-    soc.advance_ns(500_000);
+    acknowledge_every_frame(&mut soc, 200);
 
     let events = log.events();
     assert!(events.iter().any(|event| matches!(
@@ -256,6 +278,74 @@ fn normal_mode_reports_frames_on_the_transmit_pin() {
     // Nothing was looped back internally in normal mode.
     assert_eq!(r32(&mut soc, BASE + map::can::RF0R) & RF_FMP, 0);
     assert_eq!(soc.can.stats().tx_frames, 1);
+}
+
+/// Drives the pair with the bits of `frame` (as a rival node would) while the
+/// controller samples what the wire settled to.
+fn rival_sends(soc: &mut gsim_stm32f1::Soc, frame: gsim_core::CanFrame, bits: u32) {
+    use gsim_core::can::WireFrame;
+    soc.can_set_on_bus(0, true);
+    let wire = WireFrame::encode(&frame);
+    let mut decoder = FrameDecoder::new();
+    let mut ack = false;
+    for index in 0..bits {
+        // The rival starts after the intermission the controller waits for, so
+        // both nodes begin on the same bit time.
+        let rival = index
+            .checked_sub(3)
+            .and_then(|bit| wire.bits().get(bit as usize).copied());
+        let dominant = soc.can_driven_level(0) == Some(DOMINANT) || rival == Some(DOMINANT) || ack;
+        let level = if dominant { DOMINANT } else { RECESSIVE };
+        // A receiver pulls the acknowledge slot dominant.
+        ack = matches!(decoder.feed(level), RxStep::CrcDelimiter { ok: true });
+        soc.can_sample_bit(0, level);
+    }
+    soc.can_set_on_bus(0, false);
+}
+
+#[test]
+fn a_lower_identifier_wins_the_arbitration_and_the_mailbox_waits() {
+    let mut soc = gsim_stm32f1::Soc::new();
+    initialise(&mut soc, false);
+    send(&mut soc, 0x321, b"mine");
+
+    // A rival starts on the same bit with a lower identifier: it pulls the pair
+    // dominant exactly where the controller sends a recessive bit. Twelve bits
+    // are enough to lose the arbitration.
+    rival_sends(
+        &mut soc,
+        gsim_core::CanFrame::standard(0x100, b"theirs"),
+        12,
+    );
+
+    assert_eq!(soc.can.stats().arbitration_lost, 1);
+    // Losing is not an error, and the frame stays armed for the next attempt.
+    assert_eq!(soc.can.stats().tx_errors, 0);
+    assert_eq!(r32(&mut soc, BASE + map::can::TSR) & TSR_TME0, 0);
+    assert_ne!(r32(&mut soc, BASE + map::can::TSR) & TSR_ALST0, 0);
+}
+
+#[test]
+fn a_missing_acknowledge_is_an_error_and_nart_drops_the_frame() {
+    let mut soc = gsim_stm32f1::Soc::new();
+    initialise(&mut soc, false); // enables NART: no automatic retransmission
+
+    send(&mut soc, 0x123, b"solo");
+    // Nobody is on the wire, so nobody acknowledges the frame.
+    for _ in 0..200 {
+        soc.can_set_on_bus(0, true);
+        let level = soc.can_driven_level(0).unwrap_or(RECESSIVE);
+        soc.can_sample_bit(0, level);
+    }
+    soc.can_set_on_bus(0, false);
+
+    assert_eq!(soc.can.stats().tx_frames, 0);
+    assert!(soc.can.stats().tx_errors >= 1);
+    let (tec, _) = soc.can.error_counters();
+    assert!(tec >= 8, "TEC {tec}");
+    let tsr = r32(&mut soc, BASE + map::can::TSR);
+    assert_ne!(tsr & TSR_TERR0, 0);
+    assert_ne!(tsr & TSR_TME0, 0, "NART frees the mailbox");
 }
 
 #[test]

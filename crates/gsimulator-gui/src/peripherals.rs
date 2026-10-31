@@ -175,7 +175,7 @@ impl PeripheralBrowser {
                     });
             });
 
-        if status.name == "MAX7219" {
+        if status.kind.contains("MAX7219") {
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 ui.heading("点阵画面");
@@ -220,17 +220,16 @@ fn matrix_preview(ui: &mut egui::Ui, snapshot: &Snapshot) {
     ui.horizontal(|ui| {
         let (response, painter) = ui.allocate_painter(size, egui::Sense::hover());
         let origin = response.rect.min + egui::vec2(4.0, 4.0);
-        for row in 0..8 {
-            for column in 0..8 {
+        for (row, line) in pixels.iter().enumerate() {
+            for (column, on) in line.iter().enumerate() {
                 let rect = egui::Rect::from_min_size(
                     origin + egui::vec2(column as f32 * cell, row as f32 * cell),
                     egui::vec2(cell - 2.0, cell - 2.0),
                 );
-                let on = pixels[row][column];
                 painter.rect_filled(
                     rect,
                     3.0,
-                    if on {
+                    if *on {
                         lit(intensity)
                     } else {
                         Color32::from_rgb(30, 33, 39)

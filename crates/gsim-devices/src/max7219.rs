@@ -388,8 +388,7 @@ mod tests {
         }
         device.set_load(true);
         // Two frames of delay: the NOOP transaction reads back 0x0A 0x07.
-        let echoes: Vec<u16> = echoed.iter().map(|byte| *byte).collect();
-        assert_eq!(echoes[1..], [0x00, 0x0A, 0x07]);
+        assert_eq!(echoed[1..], [0x00, 0x0A, 0x07]);
     }
 
     #[test]

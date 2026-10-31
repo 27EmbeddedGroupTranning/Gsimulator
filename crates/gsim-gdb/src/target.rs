@@ -101,6 +101,15 @@ pub enum PointKind {
     Access,
 }
 
+/// What a flash session programmed, for the CLI report.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FlashReport {
+    /// Flash pages erased before programming.
+    pub pages: u32,
+    /// Bytes programmed and read back.
+    pub bytes: u32,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Breakpoint {
     address: u32,
@@ -420,6 +429,41 @@ impl Target {
 
     fn flash_lock(&mut self) {
         let _ = self.write_flash_register(flash_reg::CR, FLASH_CR_LOCK);
+    }
+
+    /// Programs every flash segment of `image`, the way a probe does after
+    /// `openocd ... program <elf> verify`: erase the pages the image touches,
+    /// program the bytes half word by half word and read them back.
+    pub fn program_image(&mut self, image: &ElfImage) -> Result<FlashReport, String> {
+        let segments: Vec<(u32, &[u8])> = image
+            .segments()
+            .iter()
+            .filter(|segment| segment.is_flash() && !segment.bytes.is_empty())
+            .map(|segment| (segment.load_address, segment.bytes.as_slice()))
+            .collect();
+        if segments.is_empty() {
+            return Err(format!(
+                "{} has no loadable segment in the flash bank",
+                image.path().display()
+            ));
+        }
+
+        let mut report = FlashReport::default();
+        let page_size = description::FLASH_PAGE_SIZE;
+        for (address, bytes) in &segments {
+            let end = address.saturating_add(bytes.len() as u32);
+            let mut page = *address & !(page_size - 1);
+            while page < end {
+                self.flash_erase(page, page_size)?;
+                report.pages += 1;
+                page += page_size;
+            }
+        }
+        for (address, bytes) in &segments {
+            self.flash_write(*address, bytes)?;
+            report.bytes += bytes.len() as u32;
+        }
+        Ok(report)
     }
 
     fn read_flash_register(&self, offset: u32) -> Result<u32, String> {

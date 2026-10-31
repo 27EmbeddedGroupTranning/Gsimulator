@@ -20,6 +20,8 @@ pub type DeviceId = u32;
 pub enum Side {
     Left,
     Right,
+    Top,
+    Bottom,
 }
 
 /// Electrical role of a device pin.
@@ -45,6 +47,14 @@ pub enum PinRole {
     Clock,
     /// Active low chip select of a synchronous bus (`SPI` `CS`).
     Select,
+    /// One end of a passive part (the resistor).
+    Terminal,
+    /// Contact of the differential CAN pair (`CANH`/`CANL`).
+    Bus,
+    /// Supply contact of a part (the `VCC` pin of a chip): wants the high rail.
+    Vcc,
+    /// Ground return contact of a part: wants the low rail.
+    Ground,
 }
 
 /// One pin of a device symbol.
@@ -133,24 +143,56 @@ pub enum DeviceKind {
     Can,
     /// MAX7219 8x8 LED matrix chain on an SPI port.
     Matrix,
+    /// High-speed crystal on `OSC_IN`/`OSC_OUT` (`PD0`/`PD1`).
+    HseCrystal,
+    /// 32.768 kHz watch crystal on `OSC32_IN`/`OSC32_OUT` (`PC14`/`PC15`).
+    LseCrystal,
+    /// Plain resistor, used to build the CAN termination network.
+    Resistor,
+    /// Oscilloscope probe on the two wires of the CAN pair.
+    Scope,
 }
 
 /// Pin index of the terminal's receive contact (data from the MCU).
 pub const UART_RX: u8 = 0;
 /// Pin index of the terminal's transmit contact (data into the MCU).
 pub const UART_TX: u8 = 1;
+/// Pin index of the terminal's `VCC` contact.
+pub const UART_VCC: u8 = 2;
+/// Pin index of the terminal's `GND` contact.
+pub const UART_GND: u8 = 3;
 /// Pin index of the encoder contact `A`.
 pub const ENCODER_A: u8 = 0;
 /// Pin index of the encoder contact `B`.
 pub const ENCODER_B: u8 = 1;
 /// Pin index of the encoder push button.
 pub const ENCODER_SW: u8 = 2;
+/// Pin index of the encoder's `VCC` contact.
+pub const ENCODER_VCC: u8 = 3;
+/// Pin index of the encoder's `GND` contact.
+pub const ENCODER_GND: u8 = 4;
 /// Pin index of the only pin of a power symbol.
 pub const POWER_PIN: u8 = 0;
 /// Pin index of the transceiver's controller transmit input (`CANx_TX`).
 pub const CAN_TXD: u8 = 0;
 /// Pin index of the transceiver's controller receive output (`CANx_RX`).
 pub const CAN_RXD: u8 = 1;
+/// Pin index of the transceiver's dominant-low wire (`CANH`).
+pub const CAN_CANH: u8 = 2;
+/// Pin index of the transceiver's dominant-high wire (`CANL`).
+pub const CAN_CANL: u8 = 3;
+/// Pin index of the transceiver's `VCC` contact.
+pub const CAN_VCC: u8 = 4;
+/// Pin index of the transceiver's `GND` contact.
+pub const CAN_GND: u8 = 5;
+/// Pin index of the first resistor terminal.
+pub const RESISTOR_A: u8 = 0;
+/// Pin index of the second resistor terminal.
+pub const RESISTOR_B: u8 = 1;
+/// Pin index of the probe on `CANH`.
+pub const SCOPE_CANH: u8 = 0;
+/// Pin index of the probe on `CANL`.
+pub const SCOPE_CANL: u8 = 1;
 /// Pin index of the matrix data input (`MOSI`).
 pub const MATRIX_DIN: u8 = 0;
 /// Pin index of the matrix shift clock (`SCK`).
@@ -159,6 +201,19 @@ pub const MATRIX_CLK: u8 = 1;
 pub const MATRIX_CS: u8 = 2;
 /// Pin index of the matrix data output (`MISO`).
 pub const MATRIX_DOUT: u8 = 3;
+/// Pin index of the matrix module's `VCC` contact.
+pub const MATRIX_VCC: u8 = 4;
+/// Pin index of the matrix module's `GND` contact.
+pub const MATRIX_GND: u8 = 5;
+/// Pin index of the first crystal terminal.
+pub const CRYSTAL_X1: u8 = 0;
+/// Pin index of the second crystal terminal.
+pub const CRYSTAL_X2: u8 = 1;
+
+/// MCU pins of the HSE oscillator (`OSC_IN`, `OSC_OUT`).
+pub const HSE_PINS: [(u8, u8); 2] = [(3, 0), (3, 1)];
+/// MCU pins of the LSE oscillator (`OSC32_IN`, `OSC32_OUT`).
+pub const LSE_PINS: [(u8, u8); 2] = [(2, 14), (2, 15)];
 
 pub const LED_PINS: [PinDef; 2] = [
     PinDef {
@@ -173,7 +228,7 @@ pub const LED_PINS: [PinDef; 2] = [
     },
 ];
 
-pub const UART_PINS: [PinDef; 2] = [
+pub const UART_PINS: [PinDef; 4] = [
     PinDef {
         name: "RX",
         role: PinRole::Rx,
@@ -184,9 +239,19 @@ pub const UART_PINS: [PinDef; 2] = [
         role: PinRole::Tx,
         side: Side::Right,
     },
+    PinDef {
+        name: "VCC",
+        role: PinRole::Vcc,
+        side: Side::Top,
+    },
+    PinDef {
+        name: "GND",
+        role: PinRole::Ground,
+        side: Side::Bottom,
+    },
 ];
 
-pub const ENCODER_PINS: [PinDef; 3] = [
+pub const ENCODER_PINS: [PinDef; 5] = [
     PinDef {
         name: "A",
         role: PinRole::Phase,
@@ -202,6 +267,16 @@ pub const ENCODER_PINS: [PinDef; 3] = [
         role: PinRole::Button,
         side: Side::Right,
     },
+    PinDef {
+        name: "VCC",
+        role: PinRole::Vcc,
+        side: Side::Top,
+    },
+    PinDef {
+        name: "GND",
+        role: PinRole::Ground,
+        side: Side::Bottom,
+    },
 ];
 
 pub const VCC_PINS: [PinDef; 1] = [PinDef {
@@ -216,7 +291,7 @@ pub const GND_PINS: [PinDef; 1] = [PinDef {
     side: Side::Right,
 }];
 
-pub const CAN_PINS: [PinDef; 2] = [
+pub const CAN_PINS: [PinDef; 4] = [
     PinDef {
         name: "TXD",
         role: PinRole::Rx,
@@ -225,6 +300,56 @@ pub const CAN_PINS: [PinDef; 2] = [
     PinDef {
         name: "RXD",
         role: PinRole::Tx,
+        side: Side::Right,
+    },
+    // The two wire contacts sit on the bus side of the part.
+    PinDef {
+        name: "CANH",
+        role: PinRole::Bus,
+        side: Side::Right,
+    },
+    PinDef {
+        name: "CANL",
+        role: PinRole::Bus,
+        side: Side::Right,
+    },
+];
+
+pub const RESISTOR_PINS: [PinDef; 2] = [
+    PinDef {
+        name: "1",
+        role: PinRole::Terminal,
+        side: Side::Left,
+    },
+    PinDef {
+        name: "2",
+        role: PinRole::Terminal,
+        side: Side::Right,
+    },
+];
+
+pub const SCOPE_PINS: [PinDef; 2] = [
+    PinDef {
+        name: "H",
+        role: PinRole::Bus,
+        side: Side::Left,
+    },
+    PinDef {
+        name: "L",
+        role: PinRole::Bus,
+        side: Side::Left,
+    },
+];
+
+pub const CRYSTAL_PINS: [PinDef; 2] = [
+    PinDef {
+        name: "X1",
+        role: PinRole::Clock,
+        side: Side::Left,
+    },
+    PinDef {
+        name: "X2",
+        role: PinRole::Clock,
         side: Side::Right,
     },
 ];
@@ -253,7 +378,7 @@ pub const MATRIX_PINS: [PinDef; 4] = [
 ];
 
 impl DeviceKind {
-    pub const ALL: [DeviceKind; 7] = [
+    pub const ALL: [DeviceKind; 11] = [
         DeviceKind::Led,
         DeviceKind::Uart,
         DeviceKind::Encoder,
@@ -261,6 +386,10 @@ impl DeviceKind {
         DeviceKind::Gnd,
         DeviceKind::Can,
         DeviceKind::Matrix,
+        DeviceKind::HseCrystal,
+        DeviceKind::LseCrystal,
+        DeviceKind::Resistor,
+        DeviceKind::Scope,
     ];
 
     pub fn pins(self) -> &'static [PinDef] {
@@ -272,6 +401,9 @@ impl DeviceKind {
             DeviceKind::Gnd => &GND_PINS,
             DeviceKind::Can => &CAN_PINS,
             DeviceKind::Matrix => &MATRIX_PINS,
+            DeviceKind::HseCrystal | DeviceKind::LseCrystal => &CRYSTAL_PINS,
+            DeviceKind::Resistor => &RESISTOR_PINS,
+            DeviceKind::Scope => &SCOPE_PINS,
         }
     }
 
@@ -281,8 +413,11 @@ impl DeviceKind {
             DeviceKind::Uart => Vec2::new(120.0, 74.0),
             DeviceKind::Encoder => Vec2::new(78.0, 82.0),
             DeviceKind::Vcc | DeviceKind::Gnd => Vec2::new(56.0, 46.0),
-            DeviceKind::Can => Vec2::new(112.0, 68.0),
-            DeviceKind::Matrix => Vec2::new(96.0, 96.0),
+            DeviceKind::Can => Vec2::new(124.0, 78.0),
+            DeviceKind::Matrix => Vec2::new(124.0, 100.0),
+            DeviceKind::HseCrystal | DeviceKind::LseCrystal => Vec2::new(84.0, 56.0),
+            DeviceKind::Resistor => Vec2::new(96.0, 44.0),
+            DeviceKind::Scope => Vec2::new(132.0, 88.0),
         }
     }
 
@@ -296,6 +431,10 @@ impl DeviceKind {
             DeviceKind::Gnd => "GND",
             DeviceKind::Can => "CAN",
             DeviceKind::Matrix => "MX",
+            DeviceKind::HseCrystal => "HSE",
+            DeviceKind::LseCrystal => "LSE",
+            DeviceKind::Resistor => "R",
+            DeviceKind::Scope => "OSC",
         }
     }
 
@@ -309,6 +448,10 @@ impl DeviceKind {
             DeviceKind::Gnd => "GND 地",
             DeviceKind::Can => "CAN 收发器",
             DeviceKind::Matrix => "SPI 灯阵",
+            DeviceKind::HseCrystal => "HSE 晶振",
+            DeviceKind::LseCrystal => "LSE 晶振",
+            DeviceKind::Resistor => "电阻",
+            DeviceKind::Scope => "示波器",
         }
     }
 
@@ -321,6 +464,9 @@ impl DeviceKind {
             DeviceKind::Vcc | DeviceKind::Gnd => "电源",
             DeviceKind::Can => "通信",
             DeviceKind::Matrix => "显示",
+            DeviceKind::HseCrystal | DeviceKind::LseCrystal => "时钟",
+            DeviceKind::Resistor => "无源",
+            DeviceKind::Scope => "仪器",
         }
     }
 
@@ -334,6 +480,10 @@ impl DeviceKind {
             DeviceKind::Gnd => "地符号，可放多个",
             DeviceKind::Can => "把 CAN1 接到虚拟总线",
             DeviceKind::Matrix => "MAX7219 驱动的 8×8 点阵",
+            DeviceKind::HseCrystal => "8 MHz 高速晶振，接到 PD0/PD1",
+            DeviceKind::LseCrystal => "32.768 kHz 晶振，接到 PC14/PC15",
+            DeviceKind::Resistor => "跨接 CANH/CANL 的终端电阻",
+            DeviceKind::Scope => "抓取 CANH/CANL 波形的示波器",
         }
     }
 
@@ -348,6 +498,10 @@ impl DeviceKind {
             DeviceKind::Gnd => "gnd 地 负极 零伏 接地",
             DeviceKind::Can => "can canbus 总线 收发器 收发 tja1050",
             DeviceKind::Matrix => "max7219 灯阵 点阵 数码管 spi 显示 oled",
+            DeviceKind::HseCrystal => "hse 晶振 crystal 8mhz 8m 晶体 振荡器 osc",
+            DeviceKind::LseCrystal => "lse 晶振 crystal 32.768khz 32768 晶体 振荡器 rtc osc32",
+            DeviceKind::Resistor => "resistor 电阻 终端电阻 120r 120欧 termination 无源",
+            DeviceKind::Scope => "oscilloscope scope 示波器 波形 探头 抓波 仪器",
         }
     }
 
@@ -361,6 +515,10 @@ impl DeviceKind {
             DeviceKind::Gnd => "gnd",
             DeviceKind::Can => "can",
             DeviceKind::Matrix => "matrix",
+            DeviceKind::HseCrystal => "hse-crystal",
+            DeviceKind::LseCrystal => "lse-crystal",
+            DeviceKind::Resistor => "resistor",
+            DeviceKind::Scope => "scope",
         }
     }
 
@@ -409,10 +567,11 @@ impl DeviceKind {
         };
         let (index, count) = self.pins_on_side(def.side, pin);
         let fraction = (index as f32 + 1.0) / (count as f32 + 1.0);
-        let y = rect.top() + rect.height() * fraction;
         match def.side {
-            Side::Left => Pos2::new(rect.left() - STUB, y),
-            Side::Right => Pos2::new(rect.right() + STUB, y),
+            Side::Left => Pos2::new(rect.left() - STUB, rect.top() + rect.height() * fraction),
+            Side::Right => Pos2::new(rect.right() + STUB, rect.top() + rect.height() * fraction),
+            Side::Top => Pos2::new(rect.left() + rect.width() * fraction, rect.top() - STUB),
+            Side::Bottom => Pos2::new(rect.left() + rect.width() * fraction, rect.bottom() + STUB),
         }
     }
 
@@ -433,6 +592,15 @@ impl DeviceKind {
     }
 }
 
+/// External oscillators found on the board.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Crystals {
+    /// Frequency of an HSE crystal wired across `PD0`/`PD1`.
+    pub hse_hz: Option<u32>,
+    /// True when an LSE crystal is wired across `PC14`/`PC15`.
+    pub lse: bool,
+}
+
 /// Runtime state of a placed device.
 ///
 /// The schematic itself stays a pure topology; the parts that need memory
@@ -448,9 +616,21 @@ pub enum Hardware {
     Encoder(gsim_devices::Encoder),
     Can(Rc<RefCell<gsim_devices::CanTransceiver>>),
     Matrix(Rc<RefCell<gsim_devices::Max7219>>),
+    Crystal(gsim_devices::Crystal),
+    /// Passive resistor: the value is read by the board rules, nothing drives.
+    Resistor(gsim_devices::Resistor),
+    /// Oscilloscope probe: the bridge pushes one sample per simulated bit.
+    Scope(Rc<RefCell<gsim_devices::Oscilloscope>>),
 }
 
 impl Hardware {
+    pub fn crystal(&self) -> Option<&gsim_devices::Crystal> {
+        match self {
+            Hardware::Crystal(crystal) => Some(crystal),
+            _ => None,
+        }
+    }
+
     pub fn uart(&self) -> Option<&gsim_devices::Uart> {
         match self {
             Hardware::Uart(uart) => Some(uart),
@@ -492,6 +672,27 @@ impl Hardware {
             _ => None,
         }
     }
+
+    pub fn resistor(&self) -> Option<&gsim_devices::Resistor> {
+        match self {
+            Hardware::Resistor(resistor) => Some(resistor),
+            _ => None,
+        }
+    }
+
+    pub fn resistor_mut(&mut self) -> Option<&mut gsim_devices::Resistor> {
+        match self {
+            Hardware::Resistor(resistor) => Some(resistor),
+            _ => None,
+        }
+    }
+
+    pub fn scope(&self) -> Option<&Rc<RefCell<gsim_devices::Oscilloscope>>> {
+        match self {
+            Hardware::Scope(scope) => Some(scope),
+            _ => None,
+        }
+    }
 }
 
 /// A device instance placed on the board.
@@ -530,10 +731,14 @@ impl Device {
 pub const STUB: f32 = 22.0;
 
 /// A point to point wire. Every wire joins exactly two pins.
-#[derive(Clone, Copy, Debug)]
+///
+/// `bends` are user placed waypoints in board space: the wire routes through
+/// them in order, which is how a schematic is drawn the way an EDA tool does.
+#[derive(Clone, Debug)]
 pub struct Wire {
     pub a: PinRef,
     pub b: PinRef,
+    pub bends: Vec<Pos2>,
 }
 
 /// The schematic: devices and the wires between them.
@@ -564,7 +769,9 @@ impl Board {
 
     /// Board shipped on first start: `VCC`/`GND` power symbols, an LED wired to
     /// PA5 and GND (so the built-in stimulus makes it blink right away), a UART
-    /// terminal on USART1's pins and a rotary encoder on PA0/PA1/PA2.
+    /// terminal on USART1's pins, a rotary encoder on PA0/PA1/PA2 and both
+    /// crystals (8 MHz HSE on `PD0`/`PD1`, 32.768 kHz LSE on `PC14`/`PC15`) so
+    /// the firmware can clock itself however its RCC setup wants.
     pub fn demo() -> Self {
         let mut board = Board::new();
 
@@ -618,6 +825,30 @@ impl Board {
                     port: 0,
                     pin: mcu_pin,
                 },
+            );
+        }
+
+        // 8 MHz HSE between OSC_IN and OSC_OUT.
+        let hse = board.add_hse_crystal(Pos2::new(300.0, 470.0));
+        for (index, (port, pin)) in [(CRYSTAL_X1, HSE_PINS[0]), (CRYSTAL_X2, HSE_PINS[1])] {
+            board.connect(
+                PinRef::Device {
+                    device: hse,
+                    pin: index,
+                },
+                PinRef::Mcu { port, pin },
+            );
+        }
+
+        // 32.768 kHz LSE between OSC32_IN and OSC32_OUT.
+        let lse = board.add_lse_crystal(Pos2::new(300.0, 570.0));
+        for (index, (port, pin)) in [(CRYSTAL_X1, LSE_PINS[0]), (CRYSTAL_X2, LSE_PINS[1])] {
+            board.connect(
+                PinRef::Device {
+                    device: lse,
+                    pin: index,
+                },
+                PinRef::Mcu { port, pin },
             );
         }
 
@@ -675,15 +906,21 @@ impl Board {
             DeviceKind::Led | DeviceKind::Vcc | DeviceKind::Gnd => Hardware::None,
             DeviceKind::Uart => Hardware::Uart(gsim_devices::Uart::new(0)),
             DeviceKind::Encoder => Hardware::Encoder(gsim_devices::Encoder::new()),
-            DeviceKind::Can => Hardware::Can(Rc::new(RefCell::new(
-                gsim_devices::CanTransceiver::attach(
+            DeviceKind::Can => {
+                Hardware::Can(Rc::new(RefCell::new(gsim_devices::CanTransceiver::attach(
                     Rc::clone(&self.can_bus),
                     &format!("CAN{index} 节点"),
                     0,
-                ),
-            ))),
+                ))))
+            }
             DeviceKind::Matrix => Hardware::Matrix(Rc::new(RefCell::new(
                 gsim_devices::Max7219::new(0, 0, 4, 1),
+            ))),
+            DeviceKind::HseCrystal => Hardware::Crystal(gsim_devices::Crystal::hse(8_000_000)),
+            DeviceKind::LseCrystal => Hardware::Crystal(gsim_devices::Crystal::lse()),
+            DeviceKind::Resistor => Hardware::Resistor(gsim_devices::Resistor::default()),
+            DeviceKind::Scope => Hardware::Scope(Rc::new(RefCell::new(
+                gsim_devices::Oscilloscope::new(&format!("OSC{index}")),
             ))),
         };
         self.devices.push(Device {
@@ -732,6 +969,77 @@ impl Board {
         self.add_device(DeviceKind::Matrix, pos)
     }
 
+    /// Places an 8 MHz HSE crystal and returns its id.
+    pub fn add_hse_crystal(&mut self, pos: Pos2) -> DeviceId {
+        self.add_device(DeviceKind::HseCrystal, pos)
+    }
+
+    /// Places a 32.768 kHz LSE crystal and returns its id.
+    pub fn add_lse_crystal(&mut self, pos: Pos2) -> DeviceId {
+        self.add_device(DeviceKind::LseCrystal, pos)
+    }
+
+    /// Places a termination resistor and returns its id.
+    pub fn add_resistor(&mut self, pos: Pos2) -> DeviceId {
+        self.add_device(DeviceKind::Resistor, pos)
+    }
+
+    /// Places an oscilloscope probe and returns its id.
+    pub fn add_scope(&mut self, pos: Pos2) -> DeviceId {
+        self.add_device(DeviceKind::Scope, pos)
+    }
+
+    /// Handles of every oscilloscope placed on the board, in placement order.
+    pub fn scopes(&self) -> Vec<Rc<RefCell<gsim_devices::Oscilloscope>>> {
+        self.devices
+            .iter()
+            .filter_map(|device| device.hardware.scope().cloned())
+            .collect()
+    }
+
+    /// Crystals wired across the oscillator pins, whatever the firmware later
+    /// decides to clock itself (or the RTC) from.
+    pub fn crystals(&self) -> Crystals {
+        let mut found = Crystals::default();
+        for device in &self.devices {
+            let Some(crystal) = device.hardware.crystal() else {
+                continue;
+            };
+            let [input, output] = match crystal.kind() {
+                gsim_devices::CrystalKind::Hse => HSE_PINS,
+                gsim_devices::CrystalKind::Lse => LSE_PINS,
+            };
+            let x1 = PinRef::Device {
+                device: device.id,
+                pin: CRYSTAL_X1,
+            };
+            let x2 = PinRef::Device {
+                device: device.id,
+                pin: CRYSTAL_X2,
+            };
+            let in_pin = PinRef::Mcu {
+                port: input.0,
+                pin: input.1,
+            };
+            let out_pin = PinRef::Mcu {
+                port: output.0,
+                pin: output.1,
+            };
+            let wired = (self.is_connected(x1, in_pin) && self.is_connected(x2, out_pin))
+                || (self.is_connected(x1, out_pin) && self.is_connected(x2, in_pin));
+            if !wired {
+                continue;
+            }
+            match crystal.kind() {
+                gsim_devices::CrystalKind::Hse => {
+                    found.hse_hz.get_or_insert(crystal.hz());
+                }
+                gsim_devices::CrystalKind::Lse => found.lse = true,
+            }
+        }
+        found
+    }
+
     /// Mutable access to the placed devices.
     pub fn devices_mut(&mut self) -> &mut [Device] {
         &mut self.devices
@@ -770,7 +1078,11 @@ impl Board {
         if a == b || self.is_connected(a, b) {
             return false;
         }
-        self.wires.push(Wire { a, b });
+        self.wires.push(Wire {
+            a,
+            b,
+            bends: Vec::new(),
+        });
         true
     }
 
@@ -780,12 +1092,129 @@ impl Board {
             .any(|wire| (wire.a == a && wire.b == b) || (wire.a == b && wire.b == a))
     }
 
+    pub fn wire_mut(&mut self, index: usize) -> Option<&mut Wire> {
+        self.wires.get_mut(index)
+    }
+
+    /// Inserts a waypoint at `position` of the wire (`0` = right after pin
+    /// `a`, `bends.len()` = right before pin `b`).
+    ///
+    /// The canvas passes the leg the user grabbed, so the wire keeps the shape
+    /// it had before the new corner was added.
+    pub fn insert_bend(&mut self, index: usize, position: usize, point: Pos2) -> bool {
+        let Some(wire) = self.wires.get_mut(index) else {
+            return false;
+        };
+        if position > wire.bends.len() {
+            return false;
+        }
+        wire.bends.insert(position, point);
+        true
+    }
+
+    /// Moves one waypoint of a wire.
+    pub fn move_bend(&mut self, index: usize, bend: usize, point: Pos2) -> bool {
+        let Some(slot) = self
+            .wires
+            .get_mut(index)
+            .and_then(|wire| wire.bends.get_mut(bend))
+        else {
+            return false;
+        };
+        *slot = point;
+        true
+    }
+
+    /// Removes one waypoint of a wire.
+    pub fn remove_bend(&mut self, index: usize, bend: usize) -> bool {
+        let Some(wire) = self.wires.get_mut(index) else {
+            return false;
+        };
+        if bend >= wire.bends.len() {
+            return false;
+        }
+        wire.bends.remove(bend);
+        true
+    }
+
     pub fn remove_wire(&mut self, index: usize) -> Option<Wire> {
         (index < self.wires.len()).then(|| self.wires.remove(index))
     }
 
     pub fn clear_wires(&mut self) {
         self.wires.clear();
+    }
+
+    /// How the CAN pair is wired: the two nets, the terminators bridging them
+    /// and the probes tapping them.
+    pub fn can_network(&self) -> CanNetwork {
+        let nets = self.nets();
+        let mut net_of: HashMap<PinRef, usize> = HashMap::new();
+        for (index, net) in nets.iter().enumerate() {
+            for node in net {
+                net_of.insert(*node, index);
+            }
+        }
+        let net_of_pin =
+            |device: DeviceId, pin: u8| net_of.get(&PinRef::Device { device, pin }).copied();
+
+        let mut network = CanNetwork::default();
+        for device in &self.devices {
+            if device.kind != DeviceKind::Can {
+                continue;
+            }
+            let (Some(canh), Some(canl)) = (
+                net_of_pin(device.id, CAN_CANH),
+                net_of_pin(device.id, CAN_CANL),
+            ) else {
+                continue;
+            };
+            if canh == canl {
+                // Both wires on one net: a dead short, not a bus.
+                continue;
+            }
+            if network.canh_net.is_none() {
+                network.canh_net = Some(canh);
+                network.canl_net = Some(canl);
+            }
+            if network.canh_net == Some(canh) && network.canl_net == Some(canl) {
+                network.nodes += 1;
+            }
+        }
+        let (Some(canh), Some(canl)) = (network.canh_net, network.canl_net) else {
+            return network;
+        };
+
+        for device in &self.devices {
+            match &device.hardware {
+                Hardware::Resistor(resistor) => {
+                    let (a, b) = (
+                        net_of_pin(device.id, RESISTOR_A),
+                        net_of_pin(device.id, RESISTOR_B),
+                    );
+                    let bridges = matches!((a, b), (Some(a), Some(b))
+                        if (a == canh && b == canl) || (a == canl && b == canh));
+                    if bridges && resistor.ohms() > 0.0 {
+                        network.terminators.push(resistor.ohms());
+                    }
+                }
+                Hardware::Scope(scope) => {
+                    if net_of_pin(device.id, SCOPE_CANH) == Some(canh)
+                        && net_of_pin(device.id, SCOPE_CANL) == Some(canl)
+                    {
+                        network.scopes.push(Rc::clone(scope));
+                    }
+                }
+                _ => {}
+            }
+        }
+        if !network.terminators.is_empty() {
+            let conductance: f64 = network.terminators.iter().map(|ohms| 1.0 / ohms).sum();
+            if conductance > 0.0 {
+                network.termination_ohm = Some(1.0 / conductance);
+            }
+        }
+        network
     }
 
     /// Pins grouped into electrically connected nets, including single pins.
@@ -891,6 +1320,35 @@ impl Board {
     }
 }
 
+/// How the CAN pair is wired on this drawing.
+///
+/// The transceiver's `CANH`/`CANL` contacts form the two nets of the pair; the
+/// terminators that bridge them and the probes that tap them are found from the
+/// topology, which is what makes "add a 120 Ω resistor" change the electrical
+/// behaviour of the simulated bus.
+#[derive(Clone, Debug, Default)]
+pub struct CanNetwork {
+    /// Net index of `CANH`.
+    pub canh_net: Option<usize>,
+    /// Net index of `CANL`.
+    pub canl_net: Option<usize>,
+    /// Parallel resistance bridging the two wires, `None` when nothing does.
+    pub termination_ohm: Option<f64>,
+    /// Values of the resistors that terminate the pair.
+    pub terminators: Vec<f64>,
+    /// Oscilloscopes wired across the pair.
+    pub scopes: Vec<Rc<RefCell<gsim_devices::Oscilloscope>>>,
+    /// Parts whose wire contacts sit on the pair.
+    pub nodes: usize,
+}
+
+impl CanNetwork {
+    /// Electrical quality of the pair, `1.0` for the textbook `60 Ω`.
+    pub fn quality(&self) -> f64 {
+        gsim_devices::quality_of(self.termination_ohm)
+    }
+}
+
 /// Effective level of one net.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum NetLevel {
@@ -963,6 +1421,12 @@ impl Board {
             }
             None => snapshot.can.observe(&self.can_bus.borrow(), None),
         }
+        snapshot.can.network = self.can_network();
+        snapshot.scopes = self
+            .scopes()
+            .iter()
+            .map(|scope| crate::sim::ScopeView::of(&scope.borrow()))
+            .collect();
 
         for device in &self.devices {
             match &device.hardware {
@@ -978,6 +1442,7 @@ impl Board {
                     let transceiver = transceiver.borrow();
                     let bus = self.can_bus.borrow();
                     let (tx, rx) = transceiver.pins();
+                    let network = &snapshot.can.network;
                     snapshot.peripherals.push(status(
                         &device.name,
                         "CAN 收发器（外部）",
@@ -986,23 +1451,66 @@ impl Board {
                             ("模式", transceiver.mode().label().to_string()),
                             (
                                 "引脚",
-                                format!(
-                                    "TXD = {}，RXD = {}",
-                                    pin_label(tx),
-                                    pin_label(rx)
-                                ),
+                                format!("TXD = {}，RXD = {}", pin_label(tx), pin_label(rx)),
                             ),
                             ("已发送帧", format!("{}", transceiver.stats().tx_frames)),
                             ("已接收帧", format!("{}", transceiver.stats().rx_frames)),
                             ("回环帧", format!("{}", transceiver.stats().loopback_frames)),
                             ("总线帧数", format!("{}", bus.stats().frames)),
-                            ("待投递", format!("{}", bus.pending(transceiver.node()))),
+                            ("终端电阻", termination_label(network.termination_ohm)),
+                            ("总线质量", format!("{:.0}%", network.quality() * 100.0)),
+                        ],
+                    ));
+                }
+                Hardware::Resistor(resistor) => {
+                    let network = &snapshot.can.network;
+                    let on_pair = network
+                        .terminators
+                        .iter()
+                        .any(|ohms| (*ohms - resistor.ohms()).abs() < f64::EPSILON);
+                    snapshot.peripherals.push(status(
+                        &device.name,
+                        "电阻（无源）",
+                        vec![
+                            ("阻值", resistor.label()),
+                            (
+                                "接在总线上",
+                                if on_pair {
+                                    "是（终端电阻）"
+                                } else {
+                                    "否"
+                                }
+                                .to_string(),
+                            ),
+                            ("总线终端", termination_label(network.termination_ohm)),
+                        ],
+                    ));
+                }
+                Hardware::Scope(scope) => {
+                    let scope = scope.borrow();
+                    snapshot.peripherals.push(status(
+                        &device.name,
+                        "示波器（仪器）",
+                        vec![
+                            ("窗口", format!("{:.2} ms", scope.window_ns() as f64 / 1e6)),
+                            ("采样点数", format!("{}", scope.samples().len())),
+                            ("尖峰", format!("{}", scope.glitches())),
+                            ("峰峰值", format!("{:.2} V", scope.peak_differential())),
+                            ("冻结", if scope.frozen() { "是" } else { "否" }.to_string()),
                         ],
                     ));
                 }
                 _ => {}
             }
         }
+    }
+}
+
+/// Text for the parallel resistance of the termination network.
+pub fn termination_label(ohms: Option<f64>) -> String {
+    match ohms {
+        Some(ohms) => format!("{} 并联", gsim_devices::format_ohms(ohms)),
+        None => "未接（开路）".to_string(),
     }
 }
 
@@ -1221,7 +1729,7 @@ mod tests {
     }
 
     #[test]
-    fn the_demo_board_ships_the_power_symbols_and_three_parts() {
+    fn the_demo_board_ships_the_power_symbols_three_parts_and_the_hse_crystal() {
         let board = Board::demo();
         let kinds: Vec<DeviceKind> = board.devices().iter().map(|device| device.kind).collect();
         assert_eq!(
@@ -1231,13 +1739,103 @@ mod tests {
                 DeviceKind::Gnd,
                 DeviceKind::Led,
                 DeviceKind::Uart,
-                DeviceKind::Encoder
+                DeviceKind::Encoder,
+                DeviceKind::HseCrystal,
+                DeviceKind::LseCrystal,
             ]
         );
         assert_eq!(board.first_of(DeviceKind::Uart).unwrap().name, "UART1");
         assert_eq!(board.first_of(DeviceKind::Encoder).unwrap().name, "ENC1");
-        // LED: 2 wires, UART: 2 wires, encoder: 3 wires.
-        assert_eq!(board.wires().len(), 7);
+        // LED: 2 wires, UART: 2, encoder: 3, HSE crystal: 2, LSE crystal: 2.
+        assert_eq!(board.wires().len(), 11);
+        assert_eq!(
+            board.crystals(),
+            Crystals {
+                hse_hz: Some(8_000_000),
+                lse: true,
+            }
+        );
+    }
+
+    #[test]
+    fn crystals_only_count_when_wired_across_the_oscillator_pins() {
+        let mut board = Board::new();
+        let hse = board.add_hse_crystal(Pos2::new(100.0, 100.0));
+        assert_eq!(board.crystals(), Crystals::default(), "no wires yet");
+
+        board.connect(
+            PinRef::Device {
+                device: hse,
+                pin: CRYSTAL_X1,
+            },
+            PinRef::Mcu {
+                port: HSE_PINS[0].0,
+                pin: HSE_PINS[0].1,
+            },
+        );
+        assert_eq!(
+            board.crystals(),
+            Crystals::default(),
+            "one terminal is not enough"
+        );
+
+        // The other terminal may be wired the other way round: crystals have
+        // no polarity.
+        board.connect(
+            PinRef::Device {
+                device: hse,
+                pin: CRYSTAL_X2,
+            },
+            PinRef::Mcu {
+                port: HSE_PINS[1].0,
+                pin: HSE_PINS[1].1,
+            },
+        );
+        assert_eq!(
+            board.crystals(),
+            Crystals {
+                hse_hz: Some(8_000_000),
+                lse: false,
+            }
+        );
+    }
+
+    #[test]
+    fn an_lse_crystal_is_detected_on_the_osc32_pins() {
+        let mut board = Board::new();
+        let lse = board.add_lse_crystal(Pos2::new(100.0, 100.0));
+        for (index, (port, pin)) in [(CRYSTAL_X1, LSE_PINS[0]), (CRYSTAL_X2, LSE_PINS[1])] {
+            board.connect(
+                PinRef::Device {
+                    device: lse,
+                    pin: index,
+                },
+                PinRef::Mcu { port, pin },
+            );
+        }
+        assert_eq!(
+            board.crystals(),
+            Crystals {
+                hse_hz: None,
+                lse: true,
+            }
+        );
+    }
+
+    #[test]
+    fn an_hse_crystal_wired_to_the_lse_pins_is_not_an_hse() {
+        let mut board = Board::new();
+        let hse = board.add_hse_crystal(Pos2::new(100.0, 100.0));
+        for (index, (port, pin)) in [(CRYSTAL_X1, LSE_PINS[0]), (CRYSTAL_X2, LSE_PINS[1])] {
+            board.connect(
+                PinRef::Device {
+                    device: hse,
+                    pin: index,
+                },
+                PinRef::Mcu { port, pin },
+            );
+        }
+        assert_eq!(board.crystals(), Crystals::default());
     }
 
     #[test]

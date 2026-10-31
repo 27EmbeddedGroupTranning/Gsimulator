@@ -24,7 +24,11 @@ fn controller() -> Soc {
     let mut soc = Soc::new();
     write(&mut soc, map::rcc::BASE + map::rcc::APB1ENR, 1 << 25);
     write(&mut soc, CAN + map::can::MCR, 1 << 0); // INRQ
-    write(&mut soc, CAN + map::can::BTR, (2 - 1) << 16 | (2 - 1) << 20 | 35);
+    write(
+        &mut soc,
+        CAN + map::can::BTR,
+        (2 - 1) << 16 | (2 - 1) << 20 | 35,
+    );
     write(&mut soc, CAN + map::can::FMR, 1);
     write(&mut soc, CAN + map::can::FS1R, 1);
     write(&mut soc, CAN + map::can::FILTER_BASE, 0x123 << 21);
@@ -44,7 +48,11 @@ fn transmit(soc: &mut Soc, id: u32, data: &[u8]) {
         high |= u32::from(*data.get(index + 4).unwrap_or(&0)) << (index * 8);
     }
     write(soc, CAN + map::can::TX_BASE, id << 21);
-    write(soc, CAN + map::can::TX_BASE + map::can::TDTR, data.len() as u32);
+    write(
+        soc,
+        CAN + map::can::TX_BASE + map::can::TDTR,
+        data.len() as u32,
+    );
     write(soc, CAN + map::can::TX_BASE + map::can::TDHR, high);
     write(soc, CAN + map::can::TX_BASE + map::can::TDLR, low);
     write(soc, CAN + map::can::TX_BASE, (id << 21) | 1); // TXRQ last
@@ -65,16 +73,33 @@ fn wired(soc: &mut Soc) -> (Rc<RefCell<CanBus>>, Rc<RefCell<CanTransceiver>>) {
     (bus, transceiver)
 }
 
+/// Steps the pair for `bits` bit times, with a second node that acknowledges
+/// every frame it decodes and never starts one.
+fn run_wire(soc: &mut Soc, bits: u32) {
+    use gsim_core::can::{FrameDecoder, RxStep, DOMINANT, RECESSIVE};
+    soc.can_set_on_bus(0, true);
+    let mut decoder = FrameDecoder::new();
+    let mut ack = false;
+    for _ in 0..bits {
+        let dominant = soc.can_driven_level(0) == Some(DOMINANT) || ack;
+        let level = if dominant { DOMINANT } else { RECESSIVE };
+        // The peer pulls the acknowledge slot dominant on the next bit.
+        ack = matches!(decoder.feed(level), RxStep::CrcDelimiter { ok: true });
+        soc.can_sample_bit(0, level);
+        soc.advance_ns(1_000);
+    }
+    soc.can_set_on_bus(0, false);
+}
+
 #[test]
 fn a_transmitted_frame_reaches_the_bus() {
     let mut soc = controller();
     let (bus, transceiver) = wired(&mut soc);
 
     transmit(&mut soc, 0x123, b"Hello");
-    // 87 bits at 22.5 us each on the 8 MHz reset clock.
-    for _ in 0..3000 {
-        soc.advance_ns(1_000);
-    }
+    // The controller is clocked by the wire, and only completes the frame once
+    // a receiver acknowledges it.
+    run_wire(&mut soc, 200);
 
     assert_eq!(bus.borrow().stats().frames, 1);
     assert_eq!(transceiver.borrow().stats().tx_frames, 1);
@@ -82,6 +107,33 @@ fn a_transmitted_frame_reaches_the_bus() {
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].node_name, "CAN1 节点");
     assert_eq!(records[0].frame.bytes(), b"Hello");
+}
+
+#[test]
+fn a_frame_nobody_acknowledges_never_reaches_the_bus() {
+    let mut soc = controller();
+    let (bus, transceiver) = wired(&mut soc);
+
+    transmit(&mut soc, 0x123, b"Hello");
+    // Same loop, but the "peer" never pulls the acknowledge slot dominant.
+    use gsim_core::can::{DOMINANT, RECESSIVE};
+    soc.can_set_on_bus(0, true);
+    for _ in 0..200 {
+        let level = soc.can_driven_level(0).unwrap_or(RECESSIVE);
+        let level = if level == DOMINANT {
+            DOMINANT
+        } else {
+            RECESSIVE
+        };
+        soc.can_sample_bit(0, level);
+        soc.advance_ns(1_000);
+    }
+    soc.can_set_on_bus(0, false);
+
+    assert_eq!(bus.borrow().stats().frames, 0);
+    assert_eq!(transceiver.borrow().stats().tx_frames, 0);
+    assert!(soc.can.stats().tx_errors >= 1, "an acknowledge error");
+    assert!(soc.can.error_counters().0 >= 8);
 }
 
 #[test]
@@ -117,20 +169,43 @@ fn a_frame_from_another_node_lands_in_the_receive_fifo() {
 }
 
 #[test]
-fn a_silent_transceiver_keeps_the_controller_off_the_wire() {
+fn a_silent_transceiver_refuses_to_drive_the_wire() {
     let mut soc = controller();
     let (bus, transceiver) = wired(&mut soc);
     transceiver
         .borrow_mut()
         .set_mode(gsim_devices::TransceiverMode::Silent);
-
-    transmit(&mut soc, 0x123, b"nope");
-    for _ in 0..3000 {
-        soc.advance_ns(1_000);
-    }
+    transceiver.borrow_mut().on_event(
+        &Event::CanFrame {
+            unit: 0,
+            direction: gsim_core::CanDirection::Tx,
+            frame: CanFrame::standard(0x123, b"nope"),
+        },
+        0,
+    );
 
     assert_eq!(bus.borrow().stats().frames, 0);
     assert_eq!(transceiver.borrow().stats().refused, 1);
+}
+
+#[test]
+fn a_silent_controller_keeps_its_transmitter_off_the_pair() {
+    let mut soc = controller();
+    // `SILM`: the block still runs, but `CAN_TX` stays released.
+    write(&mut soc, CAN + map::can::MCR, 1);
+    write(
+        &mut soc,
+        CAN + map::can::BTR,
+        (2 - 1) << 16 | (2 - 1) << 20 | 35 | (1 << 31),
+    );
+    write(&mut soc, CAN + map::can::MCR, 0);
+    transmit(&mut soc, 0x123, b"nope");
+
+    for _ in 0..200 {
+        let level = soc.can_driven_level(0);
+        assert_eq!(level, None, "a silent block never drives the pair");
+        soc.advance_ns(1_000);
+    }
 }
 
 #[test]

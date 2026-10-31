@@ -13,19 +13,32 @@
 //!   push button, scheduled edge by edge so polling firmware sees every step.
 //! * [`can_bus`] – a virtual CAN bus plus the CAN transceiver that connects one
 //!   controller to it (TXD on `PA12`, RXD on `PA11` on the F103).
+//! * [`crystal`] – the external HSE/LSE crystals; they only record what is
+//!   soldered to the oscillator pins, the firmware picks the clock source.
+//! * [`resistor`] – a plain resistor, used to build the CAN termination
+//!   network on the canvas; the board rules read its value.
+//! * [`oscilloscope`] – a two channel probe that records the wire levels so the
+//!   scope window can draw what the bus actually carried.
 //!
 //! They are ordinary state machines: feed them the [`gsim_core::Event`]s the
 //! SoC produced since the last step, then read their state for the UI or for
 //! the next register access.
 
 pub mod can_bus;
+pub mod crystal;
 pub mod encoder;
 pub mod max7219;
+pub mod oscilloscope;
+pub mod resistor;
 pub mod uart;
 
 pub use can_bus::{
-    BusRecord, CanBus, CanBusStats, CanTransceiver, NodeId, TransceiverMode, TransceiverStats,
+    bit_error_rate, quality_of, BusRecord, CanBus, CanBusStats, CanTransceiver, NodeId, Peer,
+    PeerStats, TransceiverMode, TransceiverStats, WireLevels,
 };
+pub use crystal::{Crystal, CrystalKind};
 pub use encoder::{Direction, Encoder, Phase as EncoderPhase, EDGES_PER_DETENT};
 pub use max7219::{ChipState, Max7219, MATRIX_SIZE};
+pub use oscilloscope::{Oscilloscope, ScopeSample};
+pub use resistor::{format_ohms, Resistor, CAN_TERMINATION_OHM};
 pub use uart::Uart;
