@@ -1,0 +1,9 @@
+C:/Users/27354/Desktop/CANSPI/CAN/Core/Src/main.c:99:13:CAN_ConfigFilter	48	static
+C:/Users/27354/Desktop/CANSPI/CAN/Core/Src/main.c:146:16:CAN_SendHello	16	static
+C:/Users/27354/Desktop/CANSPI/CAN/Core/Src/main.c:183:5:main	16	static
+C:/Users/27354/Desktop/CANSPI/CAN/Core/Src/main.c:274:6:SystemClock_Config	72	static
+C:/Users/27354/Desktop/CANSPI/CAN/Core/Src/main.c:314:13:MX_CAN_Init	8	static
+C:/Users/27354/Desktop/CANSPI/CAN/Core/Src/main.c:351:13:MX_SPI1_Init	8	static
+C:/Users/27354/Desktop/CANSPI/CAN/Core/Src/main.c:389:13:MX_GPIO_Init	16	static
+C:/Users/27354/Desktop/CANSPI/CAN/Core/Src/main.c:411:6:HAL_CAN_RxFifo0MsgPendingCallback	24	static
+C:/Users/27354/Desktop/CANSPI/CAN/Core/Src/main.c:449:6:Error_Handler	4	static

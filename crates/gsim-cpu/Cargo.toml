@@ -1,0 +1,13 @@
+[package]
+name = "gsim-cpu"
+description = "ARM Cortex-M3 execution core front end for Gsimulator"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+gsim-core = { workspace = true }
+gsim-stm32f1 = { workspace = true }
+armagnac = "0.3"
+object = "0.35"

@@ -1,0 +1,24 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/gsim-core",
+    "crates/gsim-stm32f1",
+    "crates/gsim-devices",
+    "crates/gsim-cpu",
+    "crates/gsim-gdb",
+    "crates/gsimulator-cli",
+    "crates/gsimulator-gui",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.74"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+gsim-core = { path = "crates/gsim-core" }
+gsim-stm32f1 = { path = "crates/gsim-stm32f1" }
+gsim-devices = { path = "crates/gsim-devices" }
+gsim-cpu = { path = "crates/gsim-cpu" }
+gsim-gdb = { path = "crates/gsim-gdb" }

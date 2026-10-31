@@ -1,0 +1,24 @@
+[package]
+name = "gsimulator-gui"
+version.workspace = true
+edition = "2021"
+license.workspace = true
+rust-version = "1.85"
+description = "Schematic-style desktop front end for the Gsimulator STM32F103 simulator"
+
+[dependencies]
+gsim-core.workspace = true
+gsim-stm32f1.workspace = true
+gsim-devices.workspace = true
+gsim-cpu.workspace = true
+eframe = "0.32"
+egui = "0.32"
+rfd = "0.15"
+
+[[bin]]
+name = "gsimulator-gui"
+path = "src/main.rs"
+
+[dev-dependencies]
+egui_kittest = { version = "0.32", features = ["wgpu", "snapshot"] }
+

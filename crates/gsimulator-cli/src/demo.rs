@@ -1,0 +1,409 @@
+//! `gsimulator demo` – a scripted firmware style tour of every phase 1 block.
+//!
+//! The demo drives the device exactly like firmware does, through register
+//! writes and reads, and prints a transcript of what the modelled hardware
+//! does in response. It needs no ELF file and no cross compiler.
+
+use std::cell::RefCell;
+use std::io::Write;
+use std::rc::Rc;
+
+use gsim_core::irq::{exception, lines};
+use gsim_core::{AccessWidth, Event, EventSink, MemoryBus};
+use gsim_stm32f1::{map, Soc};
+
+/// Runs the demonstration and prints its transcript.
+pub fn run() -> Result<(), String> {
+    println!("Gsimulator - STM32F103 on-chip peripheral demo (phase 1)");
+    println!("------------------------------------------------------");
+
+    let soc = Rc::new(RefCell::new(Soc::new()));
+    let sink = ConsoleSink;
+    soc.borrow_mut().add_event_sink(Box::new(sink));
+
+    clock_tree(&soc);
+    gpio_and_exti(&soc)?;
+    usart(&soc)?;
+    spi(&soc)?;
+    timers(&soc)?;
+    adc_with_dma(&soc)?;
+    i2c(&soc)?;
+    systick(&soc);
+    watchdog(&soc)?;
+
+    println!();
+    println!(
+        "demo finished: {} bus accesses, {} watch/reset events, {:.3} ms simulated",
+        soc.borrow().stats().reads + soc.borrow().stats().writes,
+        soc.borrow().reset_count(),
+        soc.borrow().now_ns() as f64 / 1_000_000.0
+    );
+    Ok(())
+}
+
+/// Prints USART bytes and noteworthy events as they happen.
+struct ConsoleSink;
+
+impl EventSink for ConsoleSink {
+    fn on_event(&mut self, event: &Event) {
+        match event {
+            Event::UartTx { unit, byte } if *unit == 0 => {
+                let mut stdout = std::io::stdout();
+                let _ = stdout.write_all(&[*byte]);
+                let _ = stdout.flush();
+            }
+            Event::Note {
+                source,
+                message,
+                detail,
+            } => {
+                println!("  [{source}] {message} (0x{detail:X})");
+            }
+            _ => {}
+        }
+    }
+}
+
+fn write32(soc: &Rc<RefCell<Soc>>, address: u32, value: u32) {
+    soc.borrow_mut()
+        .write(address, AccessWidth::Word, value)
+        .unwrap_or_else(|error| panic!("write 0x{address:08X}: {error}"));
+}
+
+fn read32(soc: &Rc<RefCell<Soc>>, address: u32) -> u32 {
+    soc.borrow_mut().read(address, AccessWidth::Word).unwrap()
+}
+
+fn clock_tree(soc: &Rc<RefCell<Soc>>) {
+    let clocks = soc.borrow().clocks();
+    println!();
+    println!("[RCC] power-on clock tree");
+    println!(
+        "  SYSCLK {:>9} Hz  HCLK {:>9} Hz  PCLK1 {:>9} Hz  PCLK2 {:>9} Hz",
+        clocks.sysclk_hz, clocks.hclk_hz, clocks.pclk1_hz, clocks.pclk2_hz
+    );
+
+    let rcc = map::rcc::BASE;
+    // HSE on, then wait for the ready flag like the HAL does.
+    write32(soc, rcc + map::rcc::CR, (1 << 16) | 1);
+    let mut waited = 0u64;
+    while read32(soc, rcc + map::rcc::CR) & (1 << 17) == 0 {
+        soc.borrow_mut().advance_ns(1_000);
+        waited += 1_000;
+        assert!(waited < 20_000_000, "HSE never became ready");
+    }
+    println!("  HSE ready after {:.2} ms", waited as f64 / 1_000_000.0);
+
+    // PLL x9 from HSE, AHB /1, APB1 /2, APB2 /1, ADC /6.
+    let cfgr = (1 << 16) | (0b0111 << 18) | (0b100 << 8) | (0b10 << 14);
+    write32(soc, rcc + map::rcc::CFGR, cfgr);
+    write32(soc, rcc + map::rcc::CR, (1 << 16) | (1 << 24) | 1);
+    while read32(soc, rcc + map::rcc::CR) & (1 << 25) == 0 {
+        soc.borrow_mut().advance_ns(1_000);
+    }
+    write32(soc, rcc + map::rcc::CFGR, cfgr | 0b10);
+    while (read32(soc, rcc + map::rcc::CFGR) >> 2) & 0b11 != 0b10 {
+        soc.borrow_mut().advance_ns(1_000);
+    }
+    let clocks = soc.borrow().clocks();
+    println!("[RCC] PLL locked, running from HSE x9");
+    println!(
+        "  SYSCLK {:>9} Hz  HCLK {:>9} Hz  PCLK1 {:>9} Hz  PCLK2 {:>9} Hz",
+        clocks.sysclk_hz, clocks.hclk_hz, clocks.pclk1_hz, clocks.pclk2_hz
+    );
+    println!(
+        "  TIM1/TIM2 clock {:>9} Hz, ADCCLK {:>9} Hz",
+        clocks.tim1_hz, clocks.adc_hz
+    );
+
+    // Clocks for everything used below.
+    write32(
+        soc,
+        rcc + map::rcc::APB2ENR,
+        (1 << 0) | (1 << 2) | (1 << 9) | (1 << 12) | (1 << 14),
+    );
+    write32(
+        soc,
+        rcc + map::rcc::APB1ENR,
+        (1 << 1) | (1 << 11) | (1 << 21) | (1 << 17),
+    );
+    write32(soc, rcc + map::rcc::AHBENR, 1);
+    println!("[RCC] enabled AFIO, GPIOA, ADC1, SPI1, USART1, TIM3, WWDG, I2C1, USART2, DMA1");
+}
+
+fn gpio_and_exti(soc: &Rc<RefCell<Soc>>) -> Result<(), String> {
+    println!();
+    println!("[GPIO] PA5 as a push-pull output, PA0 as a pull-down EXTI input");
+
+    // PA5 output 2 MHz: CRL nibble 5 = 0b0010.
+    let crl = read32(soc, map::gpio::BASE_A + map::gpio::CRL);
+    let crl = (crl & !(0xF << 20)) | (0b0010 << 20);
+    // PA0 input with pull-down: nibble 0 = 0b1000.
+    let crl = (crl & !0xF) | 0b1000;
+    write32(soc, map::gpio::BASE_A + map::gpio::CRL, crl);
+
+    write32(soc, map::gpio::BASE_A + map::gpio::BSRR, 1 << 5);
+    let idr = read32(soc, map::gpio::BASE_A + map::gpio::IDR);
+    println!("  PA5 high -> IDR bit 5 = {}", (idr >> 5) & 1);
+    write32(soc, map::gpio::BASE_A + map::gpio::BRR, 1 << 5);
+    println!(
+        "  PA5 low  -> IDR bit 5 = {}",
+        (read32(soc, map::gpio::BASE_A + map::gpio::IDR) >> 5) & 1
+    );
+
+    // EXTI0 <- port A, rising edge, unmasked, NVIC enabled at priority 0x20.
+    write32(soc, map::afio::BASE + map::afio::EXTICR1, 0);
+    write32(soc, map::exti::BASE + map::exti::RTSR, 1);
+    write32(soc, map::exti::BASE + map::exti::IMR, 1);
+    {
+        let mut borrow = soc.borrow_mut();
+        borrow.nvic.enable(lines::EXTI0, true);
+        borrow.nvic.set_priority(lines::EXTI0, 0x20);
+    }
+
+    // Drive the pin high: the SoC samples pins into EXTI on every step.
+    soc.borrow_mut().gpio_set_input(0, 0, true);
+    soc.borrow_mut().advance_ns(1_000);
+    let pending = soc.borrow().pending_exception();
+    println!(
+        "[EXTI] rising edge on PA0 -> PR = 0x{:04X}, pending exception = {:?}",
+        read32(soc, map::exti::BASE + map::exti::PR),
+        pending
+    );
+
+    if let Some(exception_number) = pending {
+        soc.borrow_mut().enter_exception(exception_number);
+        println!(
+            "  handler entered, nesting depth = {}",
+            soc.borrow().nvic.nesting_depth()
+        );
+        // The ISR acknowledges the line.
+        write32(soc, map::exti::BASE + map::exti::PR, 1);
+        soc.borrow_mut().exit_exception(exception_number);
+    }
+    Ok(())
+}
+
+fn usart(soc: &Rc<RefCell<Soc>>) -> Result<(), String> {
+    println!();
+    println!("[USART1] 115200 8N1 on PCLK2 = 72 MHz, polling TXE");
+
+    // 72 MHz / 115200 = 625.
+    write32(soc, map::usart::BASE_1 + map::usart::BRR, 625);
+    write32(
+        soc,
+        map::usart::BASE_1 + map::usart::CR1,
+        (1 << 3) | (1 << 13),
+    );
+    println!(
+        "  BRR = 625 -> {} baud",
+        soc.borrow().usart[0].baud(72_000_000)
+    );
+
+    print!("  wire: ");
+    for byte in b"Hello, Gsimulator!\r\n" {
+        write32(soc, map::usart::BASE_1 + map::usart::DR, u32::from(*byte));
+        // One 8N1 frame at 115200 baud is ~87 us; give each byte its time.
+        soc.borrow_mut().advance_ns(90_000);
+    }
+    println!();
+    Ok(())
+}
+
+fn spi(soc: &Rc<RefCell<Soc>>) -> Result<(), String> {
+    println!();
+    println!("[SPI1] master, fPCLK2/8, writing a MAX7219 initialisation sequence");
+
+    // PA5/PA7 as alternate function push-pull 50 MHz.
+    let mut crl = read32(soc, map::gpio::BASE_A + map::gpio::CRL);
+    crl = (crl & !(0xF << 20)) | (0b1011 << 20);
+    crl = (crl & !(0xF << 28)) | (0b1011 << 28);
+    write32(soc, map::gpio::BASE_A + map::gpio::CRL, crl);
+
+    // MSTR, BR = /8, SPE, software slave management.
+    write32(
+        soc,
+        map::spi::BASE_1 + map::spi::CR1,
+        (1 << 2) | (0b010 << 3) | (1 << 6) | (1 << 8) | (1 << 9),
+    );
+    println!("  SCK = {} Hz", soc.borrow().spi[0].sck_hz(72_000_000));
+
+    for (register, value) in [(0x09u8, 0xFFu8), (0x0B, 0x07), (0x0C, 0x01)] {
+        for byte in [register, value] {
+            write32(soc, map::spi::BASE_1 + map::spi::DR, u32::from(byte));
+            soc.borrow_mut().advance_ns(1_000);
+        }
+        println!("  frame 0x{register:02X}{value:02X} shifted out");
+    }
+    Ok(())
+}
+
+fn timers(soc: &Rc<RefCell<Soc>>) -> Result<(), String> {
+    println!();
+    println!("[TIM3] 1 kHz PWM on channel 1 (APB1 timer clock = 72 MHz)");
+
+    write32(soc, map::tim::BASE_3 + map::tim::PSC, 71); // 1 MHz counter clock
+    write32(soc, map::tim::BASE_3 + map::tim::ARR, 999); // 1 kHz period
+    write32(soc, map::tim::BASE_3 + map::tim::CCMR1, 0b110 << 4); // PWM mode 1
+    write32(soc, map::tim::BASE_3 + map::tim::CCER, 1);
+    write32(soc, map::tim::BASE_3 + map::tim::CCR1, 250);
+    write32(soc, map::tim::BASE_3 + map::tim::CR1, 1);
+
+    // Sample the compare output at four points of the period.
+    write32(soc, map::tim::BASE_3 + map::tim::SR, 0);
+    let mut elapsed = 0u64;
+    for microseconds in [100u64, 200, 300, 400] {
+        soc.borrow_mut().run_us(microseconds);
+        elapsed += microseconds;
+        let counter = soc.borrow().tim[2].counter();
+        let level = soc.borrow().tim[2].output_level(0);
+        println!(
+            "  t = {elapsed:>4} us, CNT = {counter:>4} -> OC1 = {:?}",
+            level.unwrap_or(false)
+        );
+    }
+    println!(
+        "  CCMR1 = 0x{:04X}, CCR1 = {} (25 % of 1000)",
+        read32(soc, map::tim::BASE_3 + map::tim::CCMR1),
+        read32(soc, map::tim::BASE_3 + map::tim::CCR1)
+    );
+
+    println!("[TIM3] counter overflow sets UIF and raises the TIM3 interrupt");
+    write32(soc, map::tim::BASE_3 + map::tim::SR, 0);
+    write32(soc, map::tim::BASE_3 + map::tim::DIER, 1);
+    soc.borrow_mut().nvic.enable(lines::TIM3, true);
+    soc.borrow_mut().run_us(1_100);
+    let status = read32(soc, map::tim::BASE_3 + map::tim::SR);
+    println!(
+        "  SR = 0x{status:04X} (UIF = {}), pending exception = {:?}",
+        status & 1,
+        soc.borrow().pending_exception()
+    );
+    Ok(())
+}
+
+fn adc_with_dma(soc: &Rc<RefCell<Soc>>) -> Result<(), String> {
+    println!();
+    println!("[ADC1 + DMA1 ch1] 1650 mV on channel 1 converted into a circular SRAM buffer");
+
+    let buffer = map::SRAM_BASE;
+    for index in 0..8 {
+        soc.borrow_mut()
+            .write(buffer + index * 2, AccessWidth::Half, 0)
+            .map_err(|error| error.to_string())?;
+    }
+    soc.borrow_mut().adc_set_channel_mv(0, 1, 1650);
+
+    // ADC1: channel 1, 239.5 sample cycles, single conversion, DMA on EOC.
+    write32(soc, map::adc::BASE_1 + map::adc::SMPR2, 7);
+    write32(soc, map::adc::BASE_1 + map::adc::SQR1, 0);
+    write32(soc, map::adc::BASE_1 + map::adc::SQR3, 1);
+    write32(
+        soc,
+        map::adc::BASE_1 + map::adc::CR2,
+        (1 << 0) | (1 << 1) | (1 << 8) | (1 << 22),
+    ); // ADON | CONT | DMA | SWSTART
+
+    // DMA1 channel 1: peripheral -> memory, 16 bit, circular, memory increment.
+    let channel = map::dma1::BASE + map::dma1::channel(0);
+    write32(
+        soc,
+        channel + map::dma1::CPAR,
+        map::adc::BASE_1 + map::adc::DR,
+    );
+    write32(soc, channel + map::dma1::CMAR, buffer);
+    write32(soc, channel + map::dma1::CNDTR, 8);
+    write32(
+        soc,
+        channel + map::dma1::CCR,
+        (1 << 0) | (0b01 << 8) | (1 << 5) | (1 << 7),
+    ); // EN | 16 bit | CIRC | MINC
+
+    soc.borrow_mut().run_us(120);
+
+    let mut codes = Vec::new();
+    for index in 0..8 {
+        codes.push(
+            soc.borrow_mut()
+                .read(buffer + index * 2, AccessWidth::Half)
+                .map_err(|error| error.to_string())?,
+        );
+    }
+    println!("  buffer = {codes:?}");
+    println!(
+        "  DMA ISR = 0x{:08X} (TC flags), {} transfers",
+        read32(soc, map::dma1::BASE + map::dma1::ISR),
+        soc.borrow().stats().dma_transfers
+    );
+    Ok(())
+}
+
+fn i2c(soc: &Rc<RefCell<Soc>>) -> Result<(), String> {
+    println!();
+    println!("[I2C1] master start + address 0xA0, with no device attached");
+
+    write32(soc, map::i2c::BASE_1 + map::i2c::CR2, 36); // 36 MHz peripheral clock
+    write32(soc, map::i2c::BASE_1 + map::i2c::CCR, 180); // 100 kHz
+    write32(soc, map::i2c::BASE_1 + map::i2c::TRISE, 37);
+    write32(soc, map::i2c::BASE_1 + map::i2c::CR1, 1); // PE
+    write32(soc, map::i2c::BASE_1 + map::i2c::CR1, 1 | (1 << 8)); // PE | START
+    write32(soc, map::i2c::BASE_1 + map::i2c::DR, 0xA0);
+    let sr1 = read32(soc, map::i2c::BASE_1 + map::i2c::SR1);
+    println!(
+        "  SR1 = 0x{sr1:04X} -> ACK failure = {}",
+        sr1 & (1 << 10) != 0
+    );
+    println!(
+        "  SR2 = 0x{:04X} (bus busy, master)",
+        read32(soc, map::i2c::BASE_1 + map::i2c::SR2)
+    );
+    write32(soc, map::i2c::BASE_1 + map::i2c::CR1, 1 | (1 << 9)); // STOP
+    println!(
+        "  after STOP, busy = {}",
+        read32(soc, map::i2c::BASE_1 + map::i2c::SR2) & 0b10 != 0
+    );
+    Ok(())
+}
+
+fn systick(soc: &Rc<RefCell<Soc>>) {
+    println!();
+    println!("[SysTick] 1 ms period at 72 MHz, count three ticks");
+
+    write32(soc, 0xE000_E014, 71_999);
+    write32(soc, 0xE000_E010, 0b111);
+
+    let mut ticks = 0;
+    while ticks < 3 {
+        soc.borrow_mut().advance_ns(100_000);
+        let pending = soc.borrow().nvic.is_system_pending(exception::SYSTICK);
+        if pending {
+            soc.borrow_mut()
+                .nvic
+                .set_system_pending(exception::SYSTICK, false);
+            ticks += 1;
+            println!(
+                "  tick {ticks} at {:.3} ms",
+                soc.borrow().now_ns() as f64 / 1_000_000.0
+            );
+        }
+    }
+}
+
+fn watchdog(soc: &Rc<RefCell<Soc>>) -> Result<(), String> {
+    println!();
+    println!("[IWDG] start with a 10 count reload, then let it expire");
+
+    write32(soc, map::iwdg::BASE + map::iwdg::KR, 0x5555);
+    write32(soc, map::iwdg::BASE + map::iwdg::PR, 0);
+    write32(soc, map::iwdg::BASE + map::iwdg::RLR, 10);
+    write32(soc, map::iwdg::BASE + map::iwdg::KR, 0xCCCC);
+    println!("  timeout = {} us", soc.borrow().iwdg.timeout_ns() / 1_000);
+    let before = soc.borrow().reset_count();
+    soc.borrow_mut().advance_ns(2_000_000);
+    let after = soc.borrow().reset_count();
+    println!(
+        "  resets: {before} -> {after}, cause flags in RCC_CSR = 0x{:08X}",
+        read32(soc, map::rcc::BASE + map::rcc::CSR)
+    );
+    Ok(())
+}

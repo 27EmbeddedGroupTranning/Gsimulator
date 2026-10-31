@@ -1,0 +1,10 @@
+[package]
+name = "gsim-stm32f1"
+description = "STM32F103 on-chip peripheral models"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+gsim-core = { workspace = true }

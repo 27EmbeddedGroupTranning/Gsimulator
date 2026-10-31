@@ -1,0 +1,10 @@
+C:/Users/27354/Desktop/CANSPI/CAN/Core/Src/max7219.c:39:13:MAX7219_WriteReg	32	static
+C:/Users/27354/Desktop/CANSPI/CAN/Core/Src/max7219.c:68:6:MAX7219_EchoTest	24	static
+C:/Users/27354/Desktop/CANSPI/CAN/Core/Src/max7219.c:92:13:MAX7219_WriteConfig	8	static
+C:/Users/27354/Desktop/CANSPI/CAN/Core/Src/max7219.c:106:6:MAX7219_Init	40	static
+C:/Users/27354/Desktop/CANSPI/CAN/Core/Src/max7219.c:143:6:MAX7219_Reinit	8	static
+C:/Users/27354/Desktop/CANSPI/CAN/Core/Src/max7219.c:152:6:MAX7219_SetIntensity	16	static
+C:/Users/27354/Desktop/CANSPI/CAN/Core/Src/max7219.c:162:6:MAX7219_DisplayTest	16	static
+C:/Users/27354/Desktop/CANSPI/CAN/Core/Src/max7219.c:170:6:MAX7219_Clear	16	static
+C:/Users/27354/Desktop/CANSPI/CAN/Core/Src/max7219.c:195:6:MAX7219_ShowImage	24	static
+C:/Users/27354/Desktop/CANSPI/CAN/Core/Src/max7219.c:220:6:MAX7219_ShowCheck	8	static

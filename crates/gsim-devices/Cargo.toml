@@ -1,0 +1,10 @@
+[package]
+name = "gsim-devices"
+description = "Off-chip device models (CAN transceiver, MAX7219 LED matrix) for Gsimulator"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+gsim-core = { workspace = true }

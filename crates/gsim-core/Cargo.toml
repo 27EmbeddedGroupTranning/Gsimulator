@@ -1,0 +1,9 @@
+[package]
+name = "gsim-core"
+description = "Core infrastructure for the Gsimulator on-chip peripheral simulator"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]

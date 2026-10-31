@@ -1,0 +1,18 @@
+[package]
+name = "gsimulator-cli"
+description = "Gsimulator command line front end"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "gsimulator"
+path = "src/main.rs"
+
+[dependencies]
+gsim-core = { workspace = true }
+gsim-stm32f1 = { workspace = true }
+gsim-devices = { workspace = true }
+gsim-cpu = { workspace = true }
+gsim-gdb = { workspace = true }
