@@ -158,9 +158,7 @@ fn diagnose(error: &CpuError, image: &ElfImage) -> String {
 
 /// Explains which part of the address map is missing, if it is a known gap.
 fn describe_missing(address: u32) -> &'static str {
-    if (0x4000_6400..=0x4000_67FF).contains(&address) {
-        "CAN1 is out of scope for phase 1"
-    } else if (0x4000_0000..=0x4000_7FFF).contains(&address) {
+    if (0x4000_0000..=0x4000_7FFF).contains(&address) {
         "unmapped APB1 peripheral"
     } else if (0x4001_0000..=0x4001_7FFF).contains(&address) {
         "unmapped APB2 peripheral"

@@ -34,15 +34,9 @@ pub mod register {
 }
 
 /// One MAX7219 die of the chain.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct ChipState {
     registers: [u8; 16],
-}
-
-impl Default for ChipState {
-    fn default() -> Self {
-        ChipState { registers: [0; 16] }
-    }
 }
 
 impl ChipState {
@@ -136,6 +130,22 @@ impl Max7219 {
     /// The chain the CubeMX sample firmware uses: SPI1, `PA4` as LOAD, one die.
     pub fn firmware_default() -> Self {
         Max7219::new(0, 0, 4, 1)
+    }
+
+    /// Retargets the chain to the port and latch pin it is wired to.
+    ///
+    /// A wiring change drops the half shifted word, exactly like reseating the
+    /// ribbon cable on a real module.
+    pub fn set_wiring(&mut self, unit: u8, cs_port: u8, cs_pin: u8) {
+        if (unit, cs_port, cs_pin) == (self.unit, self.cs_port, self.cs_pin) {
+            return;
+        }
+        self.unit = unit;
+        self.cs_port = cs_port;
+        self.cs_pin = cs_pin;
+        self.load_high = true;
+        self.shift = 0;
+        self.bits_in_shift = 0;
     }
 
     pub fn unit(&self) -> u8 {
@@ -279,6 +289,45 @@ mod tests {
         }
         assert_eq!(device.words(), 0);
         assert!(!device.chips()[0].enabled());
+    }
+
+    #[test]
+    fn rewiring_moves_the_chain_to_another_port() {
+        let mut device = Max7219::new(0, 0, 4, 1);
+        transfer(&mut device, &[register::SHUTDOWN, 0x01]);
+        assert_eq!(device.frames(), 2);
+
+        // SPI2 (PB13/PB15) with PB12 as LOAD: SPI1 traffic must be ignored now.
+        device.set_wiring(1, 1, 12);
+        assert_eq!(device.unit(), 1);
+        assert_eq!(device.cs_pin(), (1, 12));
+        device.on_event(&Event::SpiTransfer {
+            unit: 0,
+            tx: 0x0C,
+            rx: 0,
+        });
+        assert_eq!(device.frames(), 2, "SPI1 traffic must not reach the chain");
+
+        // The same word on the new port, latched by the new LOAD pin.
+        device.on_event(&Event::PinOutput {
+            port: 1,
+            pin: 12,
+            high: false,
+        });
+        for byte in [register::INTENSITY, 0x05] {
+            device.on_event(&Event::SpiTransfer {
+                unit: 1,
+                tx: u16::from(byte),
+                rx: 0,
+            });
+        }
+        device.on_event(&Event::PinOutput {
+            port: 1,
+            pin: 12,
+            high: true,
+        });
+        assert_eq!(device.frames(), 4);
+        assert_eq!(device.chips()[0].intensity(), 5);
     }
 
     #[test]

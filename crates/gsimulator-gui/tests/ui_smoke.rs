@@ -4,7 +4,7 @@
 
 use eframe::egui;
 use gsimulator_gui::app::App;
-use gsimulator_gui::board::{Board, DeviceKind, PinLevels, PinRef, Rail};
+use gsimulator_gui::board::{Board, DeviceKind, PinLevels, PinRef, POWER_PIN};
 use gsimulator_gui::canvas::Schematic;
 use gsimulator_gui::sim::{Simulation, Source};
 
@@ -49,18 +49,27 @@ fn stimulus_toggles_pa5_and_lights_the_demo_led() {
 }
 
 #[test]
-fn stopping_the_stimulus_leaves_the_simulation_idle() {
+fn stopping_the_stimulus_releases_the_pin_but_keeps_the_clock() {
     let mut sim = Simulation::new();
     sim.advance_frame(400_000);
     assert!(sim.now_ns() > 0, "the stimulus must start automatically");
 
     sim.stop_stimulus();
-    assert!(!sim.is_running());
     assert!(matches!(sim.source(), Source::Idle));
+    assert!(sim.is_running(), "stopping the driver must not pause the clock");
     assert!(!sim.pin_levels().is_output(0, 5), "PA5 must be released");
     assert!(!sim.pin_levels().level_of(0, 5), "PA5 must be driven low");
 
-    // Idle: frames neither advance time nor re-arm the square wave.
+    // The clock is independent of the stimulus and keeps advancing.
+    let before = sim.now_ns();
+    sim.advance_frame(400_000);
+    assert!(
+        sim.now_ns() > before,
+        "an idle simulation must still advance its clock"
+    );
+
+    // Pausing still freezes it.
+    sim.set_running(false);
     let frozen = sim.now_ns();
     sim.advance_frame(400_000);
     assert_eq!(sim.now_ns(), frozen);
@@ -68,15 +77,15 @@ fn stopping_the_stimulus_leaves_the_simulation_idle() {
     // A reset with no driver must not switch the stimulus back on.
     sim.reset();
     assert!(matches!(sim.source(), Source::Idle));
-    assert!(!sim.is_running());
-    sim.advance_frame(400_000);
-    assert_eq!(sim.now_ns(), frozen);
+    assert!(!sim.is_running(), "a paused clock stays paused after reset");
 
-    // It can be turned back on.
+    // It can be turned back on, and the clock follows the run state again.
     sim.start_stimulus();
     assert!(matches!(sim.source(), Source::Stimulus));
+    assert!(sim.is_running());
+    let before = sim.now_ns();
     sim.advance_frame(400_000);
-    assert!(sim.now_ns() > frozen);
+    assert!(sim.now_ns() > before);
 }
 
 #[test]
@@ -123,7 +132,13 @@ fn clicking_two_pins_creates_a_wire_like_an_eda_tool() {
     assert_eq!(board.wires().len(), 1);
 
     // Cancel leaves the board untouched.
-    schematic.click_pin(&mut board, PinRef::Rail(Rail::Gnd));
+    schematic.click_pin(
+        &mut board,
+        PinRef::Device {
+            device: led,
+            pin: 1,
+        },
+    );
     schematic.cancel_wire();
     assert_eq!(board.wires().len(), 1);
 }
@@ -135,7 +150,21 @@ fn schematic_renders_every_element_without_a_display() {
     let mut schematic = Schematic::default();
     // A short between VCC and GND plus an extra LED cover the short-warning and
     // partially wired paint paths as well.
-    board.connect(PinRef::Rail(Rail::Vcc), PinRef::Rail(Rail::Gnd));
+    let vcc = board.first_of(DeviceKind::Vcc).expect("demo VCC").id;
+    let gnd = board.first_of(DeviceKind::Gnd).expect("demo GND").id;
+    board.connect(
+        PinRef::Device {
+            device: vcc,
+            pin: POWER_PIN,
+        },
+        PinRef::Device {
+            device: gnd,
+            pin: POWER_PIN,
+        },
+    );
+    // The new parts are painted too.
+    board.add_can(egui::Pos2::new(200.0, 620.0));
+    board.add_matrix(egui::Pos2::new(360.0, 620.0));
     let extra = board.add_led(egui::Pos2::new(600.0, 420.0));
     board.connect(
         PinRef::Mcu { port: 2, pin: 13 },

@@ -264,13 +264,36 @@ fn a_terminal_keeps_its_bytes_while_the_receiver_is_closed() {
 }
 
 #[test]
-fn the_demo_board_has_all_three_parts_on_it() {
+fn the_demo_board_has_the_power_symbols_and_three_parts_on_it() {
     let board = Board::demo();
     let kinds: Vec<DeviceKind> = board.devices().iter().map(|device| device.kind).collect();
     assert_eq!(
         kinds,
-        vec![DeviceKind::Led, DeviceKind::Uart, DeviceKind::Encoder]
+        vec![
+            DeviceKind::Vcc,
+            DeviceKind::Gnd,
+            DeviceKind::Led,
+            DeviceKind::Uart,
+            DeviceKind::Encoder
+        ]
     );
+}
+
+#[test]
+fn the_library_lists_every_placeable_part() {
+    let kinds: Vec<DeviceKind> = DeviceKind::ALL.to_vec();
+    assert_eq!(kinds.len(), 7);
+    for expected in [
+        DeviceKind::Led,
+        DeviceKind::Uart,
+        DeviceKind::Encoder,
+        DeviceKind::Vcc,
+        DeviceKind::Gnd,
+        DeviceKind::Can,
+        DeviceKind::Matrix,
+    ] {
+        assert!(kinds.contains(&expected), "{expected:?} is not in the library");
+    }
 }
 
 #[test]

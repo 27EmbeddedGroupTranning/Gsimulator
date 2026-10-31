@@ -6,7 +6,7 @@
 
 use eframe::egui;
 use gsimulator_gui::app::App;
-use gsimulator_gui::board::{Board, PinLevels, PinRef, Rail};
+use gsimulator_gui::board::{Board, DeviceKind, PinLevels, PinRef, POWER_PIN};
 use gsimulator_gui::canvas::Schematic;
 
 #[test]
@@ -48,13 +48,17 @@ fn window_renders_offscreen() {
 fn the_stimulus_toggle_switches_the_square_wave_off() {
     use egui::accesskit::Role;
     use egui_kittest::kittest::{By, Queryable};
+    use std::cell::RefCell;
+    use std::rc::Rc;
 
-    let mut app: Option<App> = None;
+    let app: Rc<RefCell<Option<App>>> = Rc::new(RefCell::new(None));
+    let slot = Rc::clone(&app);
     let mut harness = egui_kittest::Harness::builder()
         .with_size(egui::Vec2::new(1440.0, 900.0))
         .with_pixels_per_point(1.0)
         .build(move |ctx| {
-            let app = app.get_or_insert_with(|| App::with_context(ctx, None));
+            let mut slot = slot.borrow_mut();
+            let app = slot.get_or_insert_with(|| App::with_context(ctx, None));
             app.draw(ctx);
         });
 
@@ -72,17 +76,57 @@ fn the_stimulus_toggle_switches_the_square_wave_off() {
         1,
         "the status section must disappear, only the toggle button stays"
     );
-    assert!(harness.query_by_label("未加载驱动源").is_some());
-    assert!(harness.query_by_label("内置激励：PA5 方波").is_none());
+    assert!(harness
+        .query_by_label_contains("没有引脚驱动源")
+        .is_some());
+    assert!(harness
+        .query_by_label_contains("内置激励：PA5")
+        .is_none());
+
+    // The simulation clock is not tied to the stimulus: it keeps running.
+    let stop = app.borrow().as_ref().expect("app").sim_time_ns();
+    harness.run_steps(3);
+    let later = app.borrow().as_ref().expect("app").sim_time_ns();
+    assert!(
+        later > stop,
+        "the clock must keep running after the stimulus is switched off"
+    );
+}
+
+#[test]
+fn the_stimulus_settings_window_opens() {
+    use egui_kittest::kittest::Queryable;
+
+    let mut app: Option<App> = None;
+    let mut harness = egui_kittest::Harness::builder()
+        .with_size(egui::Vec2::new(1440.0, 900.0))
+        .with_pixels_per_point(1.0)
+        .build(move |ctx| {
+            let app = app.get_or_insert_with(|| App::with_context(ctx, None));
+            app.draw(ctx);
+        });
+
+    harness.run_steps(2);
+    harness.get_by_label("⚙ 激励").click();
+    harness.run_steps(2);
+
+    assert!(harness.query_by_label("激励设置").is_some());
+    assert!(harness.query_by_label("应用并运行").is_some());
 }
 
 #[test]
 fn schematic_renders_wires_and_devices_offscreen() {
     let mut board = Board::demo();
-    let led = board.devices()[0].id;
+    let led = board.first_of(DeviceKind::Led).expect("demo LED").id;
+    let vcc = board.first_of(DeviceKind::Vcc).expect("demo VCC").id;
+    board.add_can(egui::Pos2::new(320.0, 640.0));
+    board.add_matrix(egui::Pos2::new(480.0, 640.0));
     board.add_led(egui::Pos2::new(640.0, 430.0));
     board.connect(
-        PinRef::Rail(Rail::Vcc),
+        PinRef::Device {
+            device: vcc,
+            pin: POWER_PIN,
+        },
         PinRef::Device {
             device: led,
             pin: 0,

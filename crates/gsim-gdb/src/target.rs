@@ -31,9 +31,6 @@ const FLASH_SR_EOP: u32 = 1 << 5;
 /// `SR.WRPRTERR`: a write was attempted on a locked or protected page.
 const FLASH_SR_WRPRTERR: u32 = 1 << 4;
 
-/// Size of the peripheral window: APB1, APB2 and AHB next to each other.
-const PERIPHERAL_WINDOW: u32 = 0x0004_0000;
-
 /// Signals the server reports to GDB.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Signal {
@@ -130,14 +127,13 @@ impl Target {
     pub fn new(hse_hz: u32, echo_uart: bool) -> Result<Self, String> {
         let soc = Rc::new(RefCell::new(Soc::with_hse(hse_hz)));
         if echo_uart {
-            soc.borrow_mut()
-                .add_event_sink(Box::new(|event: &Event| {
-                    if let Event::UartTx { unit: 0, byte } = event {
-                        let mut stdout = std::io::stdout();
-                        let _ = stdout.write_all(&[*byte]);
-                        let _ = stdout.flush();
-                    }
-                }));
+            soc.borrow_mut().add_event_sink(Box::new(|event: &Event| {
+                if let Event::UartTx { unit: 0, byte } = event {
+                    let mut stdout = std::io::stdout();
+                    let _ = stdout.write_all(&[*byte]);
+                    let _ = stdout.flush();
+                }
+            }));
         }
         let cpu = Cpu::new(Rc::clone(&soc)).map_err(|error| error.to_string())?;
         Ok(Target {
@@ -259,7 +255,9 @@ impl Target {
     /// Reads `length` bytes of the device address space.
     pub fn read_memory(&self, address: u32, length: u32) -> Result<Vec<u8>, String> {
         let Some(end) = address.checked_add(length) else {
-            return Err(format!("the read of 0x{address:08X} wraps the address space"));
+            return Err(format!(
+                "the read of 0x{address:08X} wraps the address space"
+            ));
         };
         let mut data = Vec::with_capacity(length as usize);
         let mut address = address;
@@ -290,7 +288,7 @@ impl Target {
         let mut address = address;
         let mut offset = 0;
         while offset < data.len() {
-            let room = self.room(address)?;
+            let room = self.room(address);
             let length = (data.len() - offset).min(room);
             let chunk = &data[offset..offset + length];
             if Memory::is_flash(address) {
@@ -305,16 +303,16 @@ impl Target {
     }
 
     /// Bytes that can be touched before the access would cross a region border.
-    fn room(&self, address: u32) -> Result<usize, String> {
+    fn room(&self, address: u32) -> usize {
         if Memory::is_flash(address) {
-            Ok((map::FLASH_BASE + map::FLASH_SIZE - address) as usize)
+            (map::FLASH_BASE + map::FLASH_SIZE - address) as usize
         } else if Memory::is_sram(address) {
-            Ok((map::SRAM_BASE + map::SRAM_SIZE - address) as usize)
-        } else if (map::APB1_BASE..map::APB1_BASE + PERIPHERAL_WINDOW).contains(&address) {
-            // One register at a time: peripherals are not plain memory.
-            Ok(4)
+            (map::SRAM_BASE + map::SRAM_SIZE - address) as usize
         } else {
-            Err(format!("0x{address:08X} cannot be written"))
+            // Peripherals, the core's system space and the bit-band aliases are
+            // register windows: one access at a time. Addresses that are not
+            // mapped at all are reported by the bus, not guessed at here.
+            4
         }
     }
 
@@ -442,7 +440,11 @@ impl Target {
     pub fn insert_breakpoint(&mut self, kind: PointKind, address: u32, _size: u32) -> bool {
         let address = address & !1;
         let hardware = kind == PointKind::Hardware;
-        if !self.breakpoints.iter().any(|point| point.address == address) {
+        if !self
+            .breakpoints
+            .iter()
+            .any(|point| point.address == address)
+        {
             self.breakpoints.push(Breakpoint { address, hardware });
             self.cpu.add_breakpoint(address);
         }
@@ -613,7 +615,11 @@ flash             flash geometry
         for row in 0..4 {
             for column in 0..4 {
                 let index = row * 4 + column;
-                text.push_str(&format!("r{:<2} 0x{:08X}  ", index, self.read_register(index)));
+                text.push_str(&format!(
+                    "r{:<2} 0x{:08X}  ",
+                    index,
+                    self.read_register(index)
+                ));
             }
             text.push('\n');
         }

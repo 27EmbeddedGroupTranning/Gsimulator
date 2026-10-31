@@ -269,7 +269,7 @@ fn load_addresses(file: &object::File<'_>) -> Vec<u32> {
             .raw_segments()
             .iter()
             .filter(|header| header.p_type(elf.endian()) == object::elf::PT_LOAD)
-            .map(|header| header.p_paddr(elf.endian()) as u32)
+            .map(|header| header.p_paddr(elf.endian()))
             .collect(),
         object::File::Elf64(elf) => elf
             .raw_segments()

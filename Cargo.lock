@@ -1468,6 +1468,7 @@ name = "gsim-devices"
 version = "0.1.0"
 dependencies = [
  "gsim-core",
+ "gsim-stm32f1",
 ]
 
 [[package]]

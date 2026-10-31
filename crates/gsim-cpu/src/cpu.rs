@@ -408,6 +408,10 @@ impl Cpu {
         self.halted = false;
         self.stop_reason = None;
         self.interrupt_count = 0;
+        self.nvic_enabled = [0; NVIC_WORDS];
+        self.nvic_iser = [0; NVIC_WORDS];
+        self.nvic_icer = [0; NVIC_WORDS];
+        self.close_look = 0;
         Ok(())
     }
 
@@ -483,7 +487,8 @@ impl Cpu {
     pub fn run(&mut self, max_instructions: u64) -> Result<StopReason, CpuError> {
         let limit = self.instructions + max_instructions;
         while self.instructions < limit && !self.halted {
-            let remaining = (limit - self.instructions).min(u64::from(self.scheduler_batch())) as u32;
+            let remaining =
+                (limit - self.instructions).min(u64::from(self.scheduler_batch())) as u32;
             self.step_with_budget(remaining)?;
         }
         Ok(self.stop_reason.unwrap_or(if self.halted {
@@ -505,7 +510,8 @@ impl Cpu {
             if self.soc.borrow().now_ns() >= deadline {
                 return Ok(StopReason::InstructionLimit);
             }
-            let remaining = (limit - self.instructions).min(u64::from(self.scheduler_batch())) as u32;
+            let remaining =
+                (limit - self.instructions).min(u64::from(self.scheduler_batch())) as u32;
             self.step_with_budget(remaining)?;
         }
         Ok(self.stop_reason.unwrap_or(if self.halted {

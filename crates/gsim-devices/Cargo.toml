@@ -8,3 +8,6 @@ license.workspace = true
 
 [dependencies]
 gsim-core = { workspace = true }
+
+[dev-dependencies]
+gsim-stm32f1 = { workspace = true }

@@ -110,9 +110,7 @@ pub fn next_frame(buffer: &mut Vec<u8>) -> Frame {
     match declared {
         // GDB and OpenOCD sum the unescaped payload; older peers summed the
         // escaped bytes, so accept either to stay compatible.
-        Some(sum) if sum == checksum(&payload) || sum == checksum(&wire) => {
-            Frame::Packet(payload)
-        }
+        Some(sum) if sum == checksum(&payload) || sum == checksum(&wire) => Frame::Packet(payload),
         _ => Frame::BadChecksum,
     }
 }

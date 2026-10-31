@@ -11,3 +11,5 @@ pub mod canvas;
 pub mod library;
 pub mod peripherals;
 pub mod sim;
+pub mod stimulus;
+pub mod waveform;

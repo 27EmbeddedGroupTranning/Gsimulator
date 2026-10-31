@@ -57,7 +57,7 @@ impl DeviceLibrary {
         egui::Window::new("器件库")
             .id(egui::Id::new("device-library"))
             .open(&mut open)
-            .default_size([600.0, 330.0])
+            .default_size([600.0, 278.0])
             .default_pos([260.0, 120.0])
             .resizable(true)
             .vscroll(false)
@@ -93,7 +93,10 @@ impl DeviceLibrary {
         ui.separator();
 
         ui.horizontal_wrapped(|ui| {
-            if ui.selectable_label(self.category.is_none(), "全部").clicked() {
+            if ui
+                .selectable_label(self.category.is_none(), "全部")
+                .clicked()
+            {
                 self.category = None;
             }
             for category in categories() {
@@ -110,7 +113,7 @@ impl DeviceLibrary {
         let filter = self.filter.trim().to_lowercase();
         let kinds: Vec<DeviceKind> = DeviceKind::ALL
             .into_iter()
-            .filter(|kind| self.category.map_or(true, |shown| kind.category() == shown))
+            .filter(|kind| self.category.is_none_or(|shown| kind.category() == shown))
             .filter(|kind| filter.is_empty() || kind.matches(&filter))
             .collect();
 
@@ -142,9 +145,7 @@ impl DeviceLibrary {
                                     |ui| self.card(ui, *kind, placed),
                                 )
                                 .inner;
-                            if picked.is_some() {
-                                place = picked;
-                            }
+                            place = picked.or(place);
                         }
                     });
                 }
@@ -219,12 +220,7 @@ fn thumbnail(ui: &mut egui::Ui, kind: DeviceKind) {
         Vec2::new(rect.width() * 0.46, rect.height() * 0.56),
     );
     painter.rect_filled(body, 4.0, COLOR_BODY);
-    painter.rect_stroke(
-        body,
-        4.0,
-        Stroke::new(1.0, COLOR_EDGE),
-        StrokeKind::Inside,
-    );
+    painter.rect_stroke(body, 4.0, Stroke::new(1.0, COLOR_EDGE), StrokeKind::Inside);
 
     let pins = kind.pins();
     let totals = [
@@ -256,6 +252,10 @@ fn thumbnail(ui: &mut egui::Ui, kind: DeviceKind) {
         DeviceKind::Led => Color32::from_rgb(230, 60, 50),
         DeviceKind::Uart => COLOR_PIN,
         DeviceKind::Encoder => Color32::from_rgb(90, 226, 120),
+        DeviceKind::Vcc => Color32::from_rgb(238, 96, 96),
+        DeviceKind::Gnd => Color32::from_rgb(120, 150, 200),
+        DeviceKind::Can => Color32::from_rgb(245, 200, 60),
+        DeviceKind::Matrix => Color32::from_rgb(70, 200, 255),
     };
     match kind {
         DeviceKind::Led => {
@@ -321,6 +321,91 @@ fn thumbnail(ui: &mut egui::Ui, kind: DeviceKind) {
                 egui::FontId::monospace(7.0),
                 COLOR_DIM,
             );
+        }
+        DeviceKind::Vcc => {
+            let center = body.center();
+            let len = body.height() * 0.28;
+            painter.line_segment(
+                [
+                    Pos2::new(center.x, center.y + len),
+                    Pos2::new(center.x, center.y - len),
+                ],
+                Stroke::new(1.8, accent),
+            );
+            painter.line_segment(
+                [
+                    Pos2::new(center.x - len * 0.7, center.y - len * 0.2),
+                    Pos2::new(center.x, center.y - len),
+                ],
+                Stroke::new(1.8, accent),
+            );
+            painter.line_segment(
+                [
+                    Pos2::new(center.x + len * 0.7, center.y - len * 0.2),
+                    Pos2::new(center.x, center.y - len),
+                ],
+                Stroke::new(1.8, accent),
+            );
+        }
+        DeviceKind::Gnd => {
+            let center = body.center();
+            let len = body.height() * 0.32;
+            for (index, width) in [1.2f32, 0.8, 0.4].into_iter().enumerate() {
+                let y = center.y - len * 0.5 + len * 0.5 * index as f32;
+                painter.line_segment(
+                    [
+                        Pos2::new(center.x - len * width, y),
+                        Pos2::new(center.x + len * width, y),
+                    ],
+                    Stroke::new(1.8, accent),
+                );
+            }
+        }
+        DeviceKind::Can => {
+            let center = body.center();
+            let half = body.width() * 0.24;
+            for (offset, forward) in [(-4.0f32, true), (4.0, false)] {
+                let y = center.y + offset;
+                let (from, tip) = if forward {
+                    (center.x - half, center.x + half)
+                } else {
+                    (center.x + half, center.x - half)
+                };
+                painter.line_segment(
+                    [Pos2::new(from, y), Pos2::new(tip, y)],
+                    Stroke::new(1.4, accent),
+                );
+                let back = tip + if forward { -4.5 } else { 4.5 };
+                painter.line_segment(
+                    [Pos2::new(back, y - 3.0), Pos2::new(tip, y)],
+                    Stroke::new(1.4, accent),
+                );
+                painter.line_segment(
+                    [Pos2::new(back, y + 3.0), Pos2::new(tip, y)],
+                    Stroke::new(1.4, accent),
+                );
+            }
+        }
+        DeviceKind::Matrix => {
+            let grid = body.shrink(body.width() * 0.14);
+            let cell = grid.width().min(grid.height()) / 8.0;
+            for row in 0..8 {
+                for column in 0..8 {
+                    // A checker board reads as "matrix" at thumbnail size.
+                    if (row + column) % 3 != 0 {
+                        continue;
+                    }
+                    let min = Pos2::new(
+                        grid.left() + column as f32 * cell + cell * 0.12,
+                        grid.top() + row as f32 * cell + cell * 0.12,
+                    );
+                    painter.rect_filled(
+                        Rect::from_min_size(min, Vec2::splat(cell * 0.76)),
+                        cell * 0.2,
+                        accent,
+                    );
+                }
+            }
         }
     }
 }

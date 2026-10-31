@@ -821,6 +821,9 @@ impl Can {
             | ((tec.min(0xFF)) << 16)
             | ((rec.min(0xFF)) << 24)
             | 0b011 << 4;
+        if tec >= 96 || rec >= 96 {
+            self.esr |= esr::EWGF;
+        }
         if tec >= 128 || rec >= 128 {
             self.esr |= esr::EPVF;
         }
@@ -951,5 +954,148 @@ impl Can {
                 ),
             ),
         ]
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gsim_core::ctx::Clocks;
+
+    fn context() -> Ctx {
+        Ctx::new(0, Clocks::HSI_8MHZ)
+    }
+
+    /// Controller that left initialisation mode with `setup` already applied.
+    fn running(setup: impl FnOnce(&mut Can, &Ctx)) -> (Can, Ctx) {
+        let cx = context();
+        let mut can = Can::new(0, Irq::new(19), Irq::new(20), Irq::new(21), Irq::new(22));
+        can.write_reg(&cx, reg::MCR, AccessWidth::Word, mcr::INRQ)
+            .unwrap();
+        setup(&mut can, &cx);
+        can.write_reg(&cx, reg::MCR, AccessWidth::Word, 0).unwrap();
+        (can, cx)
+    }
+
+    fn write(can: &mut Can, cx: &Ctx, offset: u32, value: u32) {
+        can.write_reg(cx, offset, AccessWidth::Word, value).unwrap();
+    }
+
+    #[test]
+    fn sixteen_bit_mask_filters_match_a_standard_identifier() {
+        let (mut can, cx) = running(|can, cx| {
+            // Bank 0 in 16 bit scale, mask mode, two filters in FR1, masks in FR2.
+            write(can, cx, reg::FMR, fmr::FINIT);
+            write(can, cx, reg::FS1R, 0);
+            write(can, cx, reg::FM1R, 0);
+            write(can, cx, reg::FILTER_BASE, (0x123 << 5) | (0x456 << 21));
+            write(can, cx, reg::FILTER_BASE + 4, (0x7FF << 5) | (0x7FF << 21));
+            write(can, cx, reg::FA1R, 1);
+            write(can, cx, reg::FMR, 0);
+        });
+
+        assert!(can.receive(&cx, CanFrame::standard(0x123, &[1])));
+        assert!(can.receive(&cx, CanFrame::standard(0x456, &[2])));
+        assert!(!can.receive(&cx, CanFrame::standard(0x789, &[3])));
+        assert_eq!(can.rx_level(0), 2);
+        assert_eq!(can.stats().rx_frames, 2);
+    }
+
+    #[test]
+    fn list_mode_accepts_exactly_the_listed_identifiers() {
+        let (mut can, cx) = running(|can, cx| {
+            write(can, cx, reg::FMR, fmr::FINIT);
+            write(can, cx, reg::FS1R, 1);
+            write(can, cx, reg::FM1R, 1);
+            write(can, cx, reg::FILTER_BASE, 0x123 << 21);
+            write(can, cx, reg::FILTER_BASE + 4, 0x456 << 21);
+            write(can, cx, reg::FA1R, 1);
+            write(can, cx, reg::FMR, 0);
+        });
+
+        assert!(can.receive(&cx, CanFrame::standard(0x456, &[])));
+        assert!(!can.receive(&cx, CanFrame::standard(0x457, &[])));
+        // A remote frame is a different frame type, so it must not match.
+        assert!(!can.receive(&cx, CanFrame::remote(CanFrame::standard(0x456, &[]))));
+    }
+
+    #[test]
+    fn a_filter_bank_can_route_frames_into_fifo1() {
+        let (mut can, cx) = running(|can, cx| {
+            write(can, cx, reg::FMR, fmr::FINIT);
+            write(can, cx, reg::FS1R, 1);
+            write(can, cx, reg::FFA1R, 1);
+            write(can, cx, reg::FILTER_BASE, 0x123 << 21);
+            write(can, cx, reg::FILTER_BASE + 4, 0x7FF << 21);
+            write(can, cx, reg::FA1R, 1);
+            write(can, cx, reg::FMR, 0);
+        });
+
+        assert!(can.receive(&cx, CanFrame::standard(0x123, &[7])));
+        assert_eq!(can.rx_level(0), 0);
+        assert_eq!(can.rx_level(1), 1);
+        assert_eq!(can.rx_frames(1), vec![CanFrame::standard(0x123, &[7])]);
+    }
+
+    #[test]
+    fn extended_identifiers_need_their_own_filter_image() {
+        let (mut can, cx) = running(|can, cx| {
+            write(can, cx, reg::FMR, fmr::FINIT);
+            write(can, cx, reg::FS1R, 1);
+            write(can, cx, reg::FILTER_BASE, 0x18DA_F110 << 3 | tir::IDE);
+            write(can, cx, reg::FILTER_BASE + 4, (tir::EXID | tir::IDE) & !tir::RTR);
+            write(can, cx, reg::FA1R, 1);
+            write(can, cx, reg::FMR, 0);
+        });
+
+        assert!(can.receive(&cx, CanFrame::extended(0x18DA_F110, &[0x11])));
+        assert!(!can.receive(&cx, CanFrame::extended(0x18DA_F111, &[0x11])));
+        assert!(!can.receive(&cx, CanFrame::standard(0x123, &[0x11])));
+    }
+
+    #[test]
+    fn reported_bus_faults_move_the_error_counters_and_raise_sce() {
+        let (mut can, cx) = running(|can, cx| {
+            write(can, cx, reg::IER, ier::ERRIE);
+        });
+        can.report_error(&cx, true);
+        let (tec, rec) = can.error_counters();
+        assert_eq!(tec, 8);
+        assert_eq!(rec, 0);
+        assert_ne!(can.read_reg(&cx, reg::ESR, AccessWidth::Word).unwrap() & esr::LEC, 0);
+        // Below the warning limit nothing is flagged.
+        assert_eq!(can.read_reg(&cx, reg::MSR, AccessWidth::Word).unwrap() & msr::ERRI, 0);
+
+        // 12 failed transmissions reach the 96 error warning limit.
+        for _ in 0..11 {
+            can.report_error(&cx, true);
+        }
+        let (tec, _) = can.error_counters();
+        assert_eq!(tec, 96);
+        let esr = can.read_reg(&cx, reg::ESR, AccessWidth::Word).unwrap();
+        assert_ne!(esr & esr::EWGF, 0);
+        assert_ne!(can.read_reg(&cx, reg::MSR, AccessWidth::Word).unwrap() & msr::ERRI, 0);
+    }
+
+    #[test]
+    fn bit_rate_follows_prescaler_and_segment_lengths() {
+        let (mut can, cx) = running(|can, cx| {
+            let btr = 35 | (1 << 16) | (1 << 20);
+            write(can, cx, reg::BTR, btr);
+        });
+        // 36 prescaler ticks per time quantum, five quanta per bit.
+        assert_eq!(can.bitrate(36_000_000), 200_000);
+        assert_eq!(can.bitrate(8_000_000), 44_444);
+        let _ = cx;
+    }
+
+    #[test]
+    fn a_sleeping_controller_reports_slak() {
+        let (mut can, cx) = running(|can, _cx| {});
+        let status = can.read_reg(&cx, reg::MSR, AccessWidth::Word).unwrap();
+        assert_eq!(status & msr::SLAK, 0);
+        can.write_reg(&cx, reg::MCR, AccessWidth::Word, mcr::SLEEP)
+            .unwrap();
+        let status = can.read_reg(&cx, reg::MSR, AccessWidth::Word).unwrap();
+        assert_eq!(status & msr::SLAK, msr::SLAK);
     }
 }

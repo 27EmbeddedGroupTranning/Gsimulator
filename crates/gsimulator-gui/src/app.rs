@@ -6,13 +6,14 @@ use std::path::PathBuf;
 use eframe::egui;
 use egui::{Color32, RichText};
 
-use crate::board::{Board, BoardState, DeviceKind, PinLevels, PinRef, Rail};
+use crate::board::{Board, BoardState, DeviceKind, PinLevels, PinRef, POWER_PIN};
 use crate::bridge;
 use crate::canbus::{CanAction, CanBusWindow};
 use crate::canvas::Schematic;
 use crate::library::DeviceLibrary;
 use crate::peripherals::PeripheralBrowser;
 use crate::sim::{Simulation, Snapshot, Source};
+use crate::stimulus::{StimulusAction, StimulusWindow};
 use gsim_devices::Direction;
 
 /// Instructions executed per UI frame; the slider scales this.
@@ -41,6 +42,8 @@ pub struct App {
     peripherals: PeripheralBrowser,
     /// Dedicated window for the CAN transceiver and the bus it sits on.
     can_bus: CanBusWindow,
+    /// Window with the pin/waveform settings of the built-in stimulus.
+    stimulus: StimulusWindow,
     /// Window listing every part that can be placed on the canvas.
     library: DeviceLibrary,
     /// Text typed into each UART terminal, keyed by device id.
@@ -68,7 +71,9 @@ impl App {
         let levels = sim.pin_levels();
         let board = Board::demo();
         let board_state = board.evaluate(&levels);
-        let snapshot = sim.snapshot();
+        let mut snapshot = sim.snapshot();
+        board.fill_snapshot(&mut snapshot);
+        let stimulus = StimulusWindow::from_config(sim.stimulus());
 
         App {
             sim,
@@ -85,6 +90,7 @@ impl App {
             show_status: true,
             peripherals: PeripheralBrowser::new(),
             can_bus: CanBusWindow::default(),
+            stimulus,
             library: DeviceLibrary::new(),
             uart_input: std::collections::BTreeMap::new(),
         }
@@ -117,12 +123,9 @@ impl App {
             let running = self.snapshot.running;
             let idle = matches!(self.sim.source(), Source::Idle);
             if ui
-                .add_enabled(
-                    !idle,
-                    egui::Button::new(if running { "⏸ 暂停" } else { "▶ 运行" }),
-                )
+                .button(if running { "⏸ 暂停" } else { "▶ 运行" })
                 .on_hover_text(if idle {
-                    "没有驱动源：先点击「内置激励」或加载 ELF"
+                    "没有引脚驱动源：运行只推进仿真时钟，外设与总线照常工作"
                 } else {
                     "空格键也可以切换"
                 })
@@ -145,21 +148,31 @@ impl App {
                 self.load_firmware();
             }
             let stimulus_on = matches!(self.sim.source(), Source::Stimulus);
+            let stimulus_label = self.sim.stimulus().label();
             if ui
                 .selectable_label(stimulus_on, "内置激励")
                 .on_hover_text(if stimulus_on {
-                    "PA5 方波运行中，点击关闭并释放 PA5"
+                    format!("{stimulus_label}，点击关闭并释放引脚")
                 } else {
-                    "PA5 方波，不需要固件"
+                    format!("{stimulus_label}，不需要固件")
                 })
                 .clicked()
             {
                 if stimulus_on {
+                    let pin = self.sim.stimulus().pin_label();
                     self.sim.stop_stimulus();
-                    self.schematic.say("已关闭内置激励，PA5 已释放", false);
+                    self.schematic
+                        .say(format!("已关闭内置激励，{pin} 已释放"), false);
                 } else {
                     self.sim.start_stimulus();
                 }
+            }
+            if ui
+                .button("⚙ 激励")
+                .on_hover_text("配置内置激励的引脚、波形、半周期、占空比或自定义函数")
+                .clicked()
+            {
+                self.stimulus.toggle();
             }
             ui.separator();
             if ui
@@ -212,7 +225,7 @@ impl App {
             .show(ui, |ui| {
                 ui.heading("仿真状态");
                 ui.label(
-                    RichText::new(snapshot.source.label())
+                    RichText::new(snapshot.source_label.as_str())
                         .color(if snapshot.running {
                             Color32::from_rgb(120, 220, 140)
                         } else {
@@ -275,11 +288,11 @@ impl App {
                         row("ADC", snapshot.clocks.adc_hz);
                     });
 
-                if let Some(stimulus) = snapshot.stimulus {
+                if let Some(stimulus) = &snapshot.stimulus {
                     ui.add_space(12.0);
                     ui.heading("内置激励");
                     ui.horizontal(|ui| {
-                        ui.label("PA5");
+                        ui.monospace(stimulus.config.pin_label());
                         let (text, color) = if stimulus.high {
                             ("高电平", Color32::from_rgb(90, 226, 120))
                         } else {
@@ -287,9 +300,15 @@ impl App {
                         };
                         ui.colored_label(color, text);
                     });
-                    let remaining =
-                        stimulus.next_toggle_ns.saturating_sub(snapshot.now_ns) as f64 / 1e6;
-                    ui.label(format!("{remaining:.0} ms 后翻转"));
+                    ui.label(
+                        RichText::new(stimulus.config.waveform.label())
+                            .small()
+                            .color(Color32::GRAY),
+                    );
+                    if let Some(next) = stimulus.next_toggle_ns {
+                        let remaining = next.saturating_sub(snapshot.now_ns) as f64 / 1e6;
+                        ui.label(format!("{remaining:.1} ms 后翻转"));
+                    }
                 }
 
                 ui.add_space(12.0);
@@ -383,17 +402,29 @@ impl App {
         }
         ui.horizontal(|ui| {
             ui.label(RichText::new("电源").color(Color32::GRAY));
-            for rail in Rail::ALL {
-                let color = if rail.is_high() {
-                    Color32::from_rgb(200, 90, 90)
-                } else {
-                    Color32::from_rgb(110, 135, 175)
+            for (kind, color) in [
+                (DeviceKind::Vcc, Color32::from_rgb(200, 90, 90)),
+                (DeviceKind::Gnd, Color32::from_rgb(110, 135, 175)),
+            ] {
+                let Some(device) = self.board.first_of(kind) else {
+                    ui.label(
+                        RichText::new(format!("未放置 {}", kind.label()))
+                            .small()
+                            .color(Color32::GRAY),
+                    );
+                    continue;
                 };
                 if ui
-                    .add(egui::Button::new(RichText::new(rail.label()).small()).fill(color))
+                    .add(
+                        egui::Button::new(RichText::new(kind.label()).small()).fill(color),
+                    )
+                    .on_hover_text("从这个电源符号开始连线")
                     .clicked()
                 {
-                    self.start_wire_from(PinRef::Rail(rail));
+                    self.start_wire_from(PinRef::Device {
+                        device: device.id,
+                        pin: POWER_PIN,
+                    });
                 }
             }
         });
@@ -476,6 +507,38 @@ impl App {
                         ui.label(RichText::new(format!("● {name}")).color(accent));
                         ui.label(RichText::new(format!("位置 {detents:+}")).color(Color32::GRAY));
                     }
+                    DeviceKind::Vcc => {
+                        ui.label(RichText::new(format!("● {name}")).color(accent));
+                        ui.label(RichText::new("高电平").color(Color32::GRAY));
+                    }
+                    DeviceKind::Gnd => {
+                        ui.label(RichText::new(format!("● {name}")).color(accent));
+                        ui.label(RichText::new("低电平").color(Color32::GRAY));
+                    }
+                    DeviceKind::Can => {
+                        ui.label(RichText::new(format!("● {name}")).color(accent));
+                        let (mode, frames) = device
+                            .hardware
+                            .can()
+                            .map(|transceiver| {
+                                let transceiver = transceiver.borrow();
+                                (transceiver.mode().label(), transceiver.stats().tx_frames)
+                            })
+                            .unwrap_or(("正常", 0));
+                        ui.label(
+                            RichText::new(format!("{mode} · 已发 {frames}"))
+                                .color(Color32::GRAY),
+                        );
+                    }
+                    DeviceKind::Matrix => {
+                        ui.label(RichText::new(format!("● {name}")).color(accent));
+                        let words = device
+                            .hardware
+                            .matrix()
+                            .map(|matrix| matrix.borrow().words())
+                            .unwrap_or(0);
+                        ui.label(RichText::new(format!("已锁存 {words} 字")).color(Color32::GRAY));
+                    }
                 }
                 if ui.small_button("🗑").clicked() {
                     remove = Some(id);
@@ -499,7 +562,11 @@ impl App {
             match kind {
                 DeviceKind::Uart => self.uart_controls(ui, id),
                 DeviceKind::Encoder => self.encoder_controls(ui, id),
-                DeviceKind::Led => {}
+                DeviceKind::Led
+                | DeviceKind::Vcc
+                | DeviceKind::Gnd
+                | DeviceKind::Can
+                | DeviceKind::Matrix => {}
             }
         }
         if let Some(id) = remove {
@@ -677,24 +744,61 @@ impl App {
         }
     }
 
+    /// Takes a fresh frame and completes it with the parts placed on the board.
+    fn refresh_snapshot(&mut self) {
+        self.snapshot = self.sim.snapshot();
+        self.board.fill_snapshot(&mut self.snapshot);
+    }
+
     /// Applies a command issued from the CAN bus window.
     fn apply_can_action(&mut self, action: CanAction) {
         match action {
             CanAction::Inject(frame) => {
-                self.sim.inject_can_frame(frame);
+                let now = self.sim.now_ns();
+                self.board.can_bus().borrow_mut().inject(frame, now);
                 self.schematic.say(
                     format!("已向总线注入 {} {}", frame.id_label(), frame.data_label()),
                     false,
                 );
             }
-            CanAction::ClearLog => self.sim.clear_can_log(),
+            CanAction::ClearLog => self.board.can_bus().borrow_mut().clear_records(),
             CanAction::SetMode(mode) => {
-                self.sim.set_transceiver_mode(mode);
-                self.schematic
-                    .say(format!("CAN 收发器切换到 {}", mode.label()), false);
+                let mut changed = false;
+                for transceiver in self.board.transceivers() {
+                    transceiver.borrow_mut().set_mode(mode);
+                    changed = true;
+                }
+                if changed {
+                    self.schematic
+                        .say(format!("CAN 收发器切换到 {}", mode.label()), false);
+                } else {
+                    self.schematic
+                        .say("画布上还没有 CAN 收发器，先从器件库放置一个", true);
+                }
             }
         }
-        self.snapshot = self.sim.snapshot();
+        self.refresh_snapshot();
+    }
+
+    fn apply_stimulus_action(&mut self, action: StimulusAction) {
+        match action {
+            StimulusAction::Apply { config, run } => match self.sim.set_stimulus_config(config) {
+                Ok(()) => {
+                    if run {
+                        self.sim.start_stimulus();
+                    }
+                    self.refresh_snapshot();
+                    self.schematic.say("已应用内置激励设置", false);
+                }
+                Err(error) => self.schematic.say(error, true),
+            },
+            StimulusAction::Stop => {
+                self.sim.stop_stimulus();
+                self.refresh_snapshot();
+                self.schematic
+                    .say("已停止内置激励，引脚已释放（仿真时钟继续运行）", false);
+            }
+        }
     }
 
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
@@ -768,7 +872,7 @@ impl App {
         }
 
         let before_ns = self.snapshot.now_ns;
-        self.snapshot = self.sim.snapshot();
+        self.refresh_snapshot();
         self.update_speed(std::time::Instant::now(), before_ns);
         self.levels = self.snapshot.levels.clone();
         self.board_state = self.board.evaluate(&self.levels);
@@ -827,6 +931,9 @@ impl App {
         self.peripherals.show(ctx, &self.snapshot);
         if let Some(action) = self.can_bus.show(ctx, &self.snapshot) {
             self.apply_can_action(action);
+        }
+        if let Some(action) = self.stimulus.show(ctx, &self.snapshot) {
+            self.apply_stimulus_action(action);
         }
         // Picking a part in the library arms the canvas: the next click on the
         // drawing drops it (dragging the card there works too).

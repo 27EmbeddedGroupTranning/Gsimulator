@@ -8,7 +8,9 @@
 //! device code - the board lives entirely in the front end.
 
 use egui::{Pos2, Vec2};
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
+use std::rc::Rc;
 
 /// Identifier of a device placed on the board.
 pub type DeviceId = u32;
@@ -35,6 +37,14 @@ pub enum PinRole {
     Phase,
     /// Momentary switch contact (encoder shaft).
     Button,
+    /// Supplies a logic high (the `VCC` power symbol).
+    PowerHigh,
+    /// Supplies a logic low (the `GND` power symbol).
+    PowerLow,
+    /// Clock of a synchronous bus (`SPI` `CLK`).
+    Clock,
+    /// Active low chip select of a synchronous bus (`SPI` `CS`).
+    Select,
 }
 
 /// One pin of a device symbol.
@@ -49,30 +59,7 @@ pub struct PinDef {
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub enum PinRef {
     Mcu { port: u8, pin: u8 },
-    Rail(Rail),
     Device { device: DeviceId, pin: u8 },
-}
-
-/// Power rails that exist on every board.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
-pub enum Rail {
-    Vcc,
-    Gnd,
-}
-
-impl Rail {
-    pub const ALL: [Rail; 2] = [Rail::Vcc, Rail::Gnd];
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Rail::Vcc => "VCC",
-            Rail::Gnd => "GND",
-        }
-    }
-
-    pub fn is_high(self) -> bool {
-        self == Rail::Vcc
-    }
 }
 
 impl PinRef {
@@ -89,7 +76,6 @@ impl PinRef {
                     pin
                 )
             }
-            PinRef::Rail(rail) => rail.label().to_string(),
             PinRef::Device { device, pin } => match board.device(*device) {
                 Some(device) => format!("{}.{}", device.name, device.pin_name(*pin)),
                 None => format!("device{device}.{pin}"),
@@ -139,6 +125,14 @@ pub enum DeviceKind {
     Led,
     Uart,
     Encoder,
+    /// `VCC` power symbol: every net it touches is pulled high.
+    Vcc,
+    /// `GND` power symbol: every net it touches is pulled low.
+    Gnd,
+    /// CAN transceiver between the controller's `TXD`/`RXD` and the virtual bus.
+    Can,
+    /// MAX7219 8x8 LED matrix chain on an SPI port.
+    Matrix,
 }
 
 /// Pin index of the terminal's receive contact (data from the MCU).
@@ -151,6 +145,20 @@ pub const ENCODER_A: u8 = 0;
 pub const ENCODER_B: u8 = 1;
 /// Pin index of the encoder push button.
 pub const ENCODER_SW: u8 = 2;
+/// Pin index of the only pin of a power symbol.
+pub const POWER_PIN: u8 = 0;
+/// Pin index of the transceiver's controller transmit input (`CANx_TX`).
+pub const CAN_TXD: u8 = 0;
+/// Pin index of the transceiver's controller receive output (`CANx_RX`).
+pub const CAN_RXD: u8 = 1;
+/// Pin index of the matrix data input (`MOSI`).
+pub const MATRIX_DIN: u8 = 0;
+/// Pin index of the matrix shift clock (`SCK`).
+pub const MATRIX_CLK: u8 = 1;
+/// Pin index of the matrix latch (`CS`/`LOAD`).
+pub const MATRIX_CS: u8 = 2;
+/// Pin index of the matrix data output (`MISO`).
+pub const MATRIX_DOUT: u8 = 3;
 
 pub const LED_PINS: [PinDef; 2] = [
     PinDef {
@@ -196,14 +204,74 @@ pub const ENCODER_PINS: [PinDef; 3] = [
     },
 ];
 
+pub const VCC_PINS: [PinDef; 1] = [PinDef {
+    name: "+",
+    role: PinRole::PowerHigh,
+    side: Side::Right,
+}];
+
+pub const GND_PINS: [PinDef; 1] = [PinDef {
+    name: "-",
+    role: PinRole::PowerLow,
+    side: Side::Right,
+}];
+
+pub const CAN_PINS: [PinDef; 2] = [
+    PinDef {
+        name: "TXD",
+        role: PinRole::Rx,
+        side: Side::Left,
+    },
+    PinDef {
+        name: "RXD",
+        role: PinRole::Tx,
+        side: Side::Right,
+    },
+];
+
+pub const MATRIX_PINS: [PinDef; 4] = [
+    PinDef {
+        name: "DIN",
+        role: PinRole::Rx,
+        side: Side::Left,
+    },
+    PinDef {
+        name: "CLK",
+        role: PinRole::Clock,
+        side: Side::Left,
+    },
+    PinDef {
+        name: "CS",
+        role: PinRole::Select,
+        side: Side::Left,
+    },
+    PinDef {
+        name: "DOUT",
+        role: PinRole::Tx,
+        side: Side::Right,
+    },
+];
+
 impl DeviceKind {
-    pub const ALL: [DeviceKind; 3] = [DeviceKind::Led, DeviceKind::Uart, DeviceKind::Encoder];
+    pub const ALL: [DeviceKind; 7] = [
+        DeviceKind::Led,
+        DeviceKind::Uart,
+        DeviceKind::Encoder,
+        DeviceKind::Vcc,
+        DeviceKind::Gnd,
+        DeviceKind::Can,
+        DeviceKind::Matrix,
+    ];
 
     pub fn pins(self) -> &'static [PinDef] {
         match self {
             DeviceKind::Led => &LED_PINS,
             DeviceKind::Uart => &UART_PINS,
             DeviceKind::Encoder => &ENCODER_PINS,
+            DeviceKind::Vcc => &VCC_PINS,
+            DeviceKind::Gnd => &GND_PINS,
+            DeviceKind::Can => &CAN_PINS,
+            DeviceKind::Matrix => &MATRIX_PINS,
         }
     }
 
@@ -212,6 +280,9 @@ impl DeviceKind {
             DeviceKind::Led => Vec2::new(92.0, 58.0),
             DeviceKind::Uart => Vec2::new(120.0, 74.0),
             DeviceKind::Encoder => Vec2::new(78.0, 82.0),
+            DeviceKind::Vcc | DeviceKind::Gnd => Vec2::new(56.0, 46.0),
+            DeviceKind::Can => Vec2::new(112.0, 68.0),
+            DeviceKind::Matrix => Vec2::new(96.0, 96.0),
         }
     }
 
@@ -221,6 +292,10 @@ impl DeviceKind {
             DeviceKind::Led => "LED",
             DeviceKind::Uart => "UART",
             DeviceKind::Encoder => "ENC",
+            DeviceKind::Vcc => "VCC",
+            DeviceKind::Gnd => "GND",
+            DeviceKind::Can => "CAN",
+            DeviceKind::Matrix => "MX",
         }
     }
 
@@ -230,6 +305,10 @@ impl DeviceKind {
             DeviceKind::Led => "LED",
             DeviceKind::Uart => "UART 终端",
             DeviceKind::Encoder => "旋转编码器",
+            DeviceKind::Vcc => "VCC 电源",
+            DeviceKind::Gnd => "GND 地",
+            DeviceKind::Can => "CAN 收发器",
+            DeviceKind::Matrix => "SPI 灯阵",
         }
     }
 
@@ -239,6 +318,9 @@ impl DeviceKind {
             DeviceKind::Led => "指示",
             DeviceKind::Uart => "通信",
             DeviceKind::Encoder => "交互",
+            DeviceKind::Vcc | DeviceKind::Gnd => "电源",
+            DeviceKind::Can => "通信",
+            DeviceKind::Matrix => "显示",
         }
     }
 
@@ -248,6 +330,10 @@ impl DeviceKind {
             DeviceKind::Led => "按网络电平点亮的指示灯",
             DeviceKind::Uart => "收发串口字节的文本终端",
             DeviceKind::Encoder => "带按键的正交旋转编码器",
+            DeviceKind::Vcc => "高电平电源符号，可放多个",
+            DeviceKind::Gnd => "地符号，可放多个",
+            DeviceKind::Can => "把 CAN1 接到虚拟总线",
+            DeviceKind::Matrix => "MAX7219 驱动的 8×8 点阵",
         }
     }
 
@@ -258,6 +344,10 @@ impl DeviceKind {
             DeviceKind::Led => "led 发光二极管 指示灯 灯",
             DeviceKind::Uart => "uart usart 串口 串行 终端 terminal 控制台",
             DeviceKind::Encoder => "encoder 编码器 旋钮 旋转 ec11",
+            DeviceKind::Vcc => "vcc 电源 正极 高电平 供电",
+            DeviceKind::Gnd => "gnd 地 负极 零伏 接地",
+            DeviceKind::Can => "can canbus 总线 收发器 收发 tja1050",
+            DeviceKind::Matrix => "max7219 灯阵 点阵 数码管 spi 显示 oled",
         }
     }
 
@@ -267,7 +357,16 @@ impl DeviceKind {
             DeviceKind::Led => "led",
             DeviceKind::Uart => "uart",
             DeviceKind::Encoder => "encoder",
+            DeviceKind::Vcc => "vcc",
+            DeviceKind::Gnd => "gnd",
+            DeviceKind::Can => "can",
+            DeviceKind::Matrix => "matrix",
         }
+    }
+
+    /// True for the two power symbols, which are drawn without a body box.
+    pub fn is_power(self) -> bool {
+        matches!(self, DeviceKind::Vcc | DeviceKind::Gnd)
     }
 
     /// Pin names of the symbol, e.g. `A K`.
@@ -337,13 +436,18 @@ impl DeviceKind {
 /// Runtime state of a placed device.
 ///
 /// The schematic itself stays a pure topology; the parts that need memory
-/// (a terminal's log, an encoder's phase) keep it here.
+/// (a terminal's log, an encoder's phase, a matrix's frame buffer) keep it
+/// here. The two bus parts are shared with the simulation through `Rc`, which
+/// is how the bridge lets them see the events of the slice being executed.
 #[derive(Clone, Debug)]
 pub enum Hardware {
-    /// Stateless part (the LED is evaluated from the nets alone).
+    /// Stateless part (the LED and the power symbols are evaluated from the
+    /// nets alone).
     None,
     Uart(gsim_devices::Uart),
     Encoder(gsim_devices::Encoder),
+    Can(Rc<RefCell<gsim_devices::CanTransceiver>>),
+    Matrix(Rc<RefCell<gsim_devices::Max7219>>),
 }
 
 impl Hardware {
@@ -371,6 +475,20 @@ impl Hardware {
     pub fn encoder_mut(&mut self) -> Option<&mut gsim_devices::Encoder> {
         match self {
             Hardware::Encoder(encoder) => Some(encoder),
+            _ => None,
+        }
+    }
+
+    pub fn can(&self) -> Option<&Rc<RefCell<gsim_devices::CanTransceiver>>> {
+        match self {
+            Hardware::Can(transceiver) => Some(transceiver),
+            _ => None,
+        }
+    }
+
+    pub fn matrix(&self) -> Option<&Rc<RefCell<gsim_devices::Max7219>>> {
+        match self {
+            Hardware::Matrix(matrix) => Some(matrix),
             _ => None,
         }
     }
@@ -418,20 +536,14 @@ pub struct Wire {
     pub b: PinRef,
 }
 
-/// A power rail symbol on the board.
-#[derive(Clone, Copy, Debug)]
-pub struct RailNode {
-    pub rail: Rail,
-    pub pos: Pos2,
-}
-
-/// The schematic: devices, rails and the wires between them.
+/// The schematic: devices and the wires between them.
 #[derive(Clone, Debug)]
 pub struct Board {
     devices: Vec<Device>,
     wires: Vec<Wire>,
     next_id: DeviceId,
-    rails: [RailNode; 2],
+    /// Virtual CAN bus every transceiver on the board is attached to.
+    can_bus: Rc<RefCell<gsim_devices::CanBus>>,
 }
 
 impl Default for Board {
@@ -446,24 +558,18 @@ impl Board {
             devices: Vec::new(),
             wires: Vec::new(),
             next_id: 1,
-            rails: [
-                RailNode {
-                    rail: Rail::Vcc,
-                    pos: Pos2::new(430.0, 120.0),
-                },
-                RailNode {
-                    rail: Rail::Gnd,
-                    pos: Pos2::new(430.0, 210.0),
-                },
-            ],
+            can_bus: Rc::new(RefCell::new(gsim_devices::CanBus::new())),
         }
     }
 
-    /// Board shipped on first start: an LED wired to PA5 and GND (so the
-    /// built-in stimulus makes it blink right away), a UART terminal on
-    /// USART1's pins and a rotary encoder on PA0/PA1/PA2.
+    /// Board shipped on first start: `VCC`/`GND` power symbols, an LED wired to
+    /// PA5 and GND (so the built-in stimulus makes it blink right away), a UART
+    /// terminal on USART1's pins and a rotary encoder on PA0/PA1/PA2.
     pub fn demo() -> Self {
         let mut board = Board::new();
+
+        board.add_vcc(Pos2::new(430.0, 110.0));
+        let gnd = board.add_gnd(Pos2::new(430.0, 200.0));
 
         let led = board.add_led(Pos2::new(600.0, 120.0));
         board.connect(
@@ -474,7 +580,10 @@ impl Board {
             },
         );
         board.connect(
-            PinRef::Rail(Rail::Gnd),
+            PinRef::Device {
+                device: gnd,
+                pin: POWER_PIN,
+            },
             PinRef::Device {
                 device: led,
                 pin: 1,
@@ -523,16 +632,25 @@ impl Board {
         &self.wires
     }
 
-    pub fn rail_pos(&self, rail: Rail) -> Pos2 {
-        self.rails
-            .iter()
-            .find(|node| node.rail == rail)
-            .map(|node| node.pos)
-            .unwrap_or(Pos2::ZERO)
+    /// The virtual bus every CAN transceiver on the board talks to.
+    pub fn can_bus(&self) -> Rc<RefCell<gsim_devices::CanBus>> {
+        Rc::clone(&self.can_bus)
     }
 
-    pub fn rail_mut(&mut self, rail: Rail) -> Option<&mut RailNode> {
-        self.rails.iter_mut().find(|node| node.rail == rail)
+    /// Handles of every CAN transceiver placed on the board, in placement order.
+    pub fn transceivers(&self) -> Vec<Rc<RefCell<gsim_devices::CanTransceiver>>> {
+        self.devices
+            .iter()
+            .filter_map(|device| device.hardware.can().cloned())
+            .collect()
+    }
+
+    /// Handles of every LED matrix placed on the board, in placement order.
+    pub fn matrices(&self) -> Vec<Rc<RefCell<gsim_devices::Max7219>>> {
+        self.devices
+            .iter()
+            .filter_map(|device| device.hardware.matrix().cloned())
+            .collect()
     }
 
     pub fn device(&self, id: DeviceId) -> Option<&Device> {
@@ -543,15 +661,30 @@ impl Board {
         self.devices.iter_mut().find(|device| device.id == id)
     }
 
+    /// Placed device of `kind` with the lowest id, if any.
+    pub fn first_of(&self, kind: DeviceKind) -> Option<&Device> {
+        self.devices.iter().find(|device| device.kind == kind)
+    }
+
     /// Places a new device of any kind and returns its id.
     pub fn add_device(&mut self, kind: DeviceKind, pos: Pos2) -> DeviceId {
         let id = self.next_id;
         self.next_id += 1;
         let index = self.devices.iter().filter(|d| d.kind == kind).count() + 1;
         let hardware = match kind {
-            DeviceKind::Led => Hardware::None,
+            DeviceKind::Led | DeviceKind::Vcc | DeviceKind::Gnd => Hardware::None,
             DeviceKind::Uart => Hardware::Uart(gsim_devices::Uart::new(0)),
             DeviceKind::Encoder => Hardware::Encoder(gsim_devices::Encoder::new()),
+            DeviceKind::Can => Hardware::Can(Rc::new(RefCell::new(
+                gsim_devices::CanTransceiver::attach(
+                    Rc::clone(&self.can_bus),
+                    &format!("CAN{index} 节点"),
+                    0,
+                ),
+            ))),
+            DeviceKind::Matrix => Hardware::Matrix(Rc::new(RefCell::new(
+                gsim_devices::Max7219::new(0, 0, 4, 1),
+            ))),
         };
         self.devices.push(Device {
             id,
@@ -579,13 +712,33 @@ impl Board {
         self.add_device(DeviceKind::Encoder, pos)
     }
 
+    /// Places a new `VCC` symbol and returns its id.
+    pub fn add_vcc(&mut self, pos: Pos2) -> DeviceId {
+        self.add_device(DeviceKind::Vcc, pos)
+    }
+
+    /// Places a new `GND` symbol and returns its id.
+    pub fn add_gnd(&mut self, pos: Pos2) -> DeviceId {
+        self.add_device(DeviceKind::Gnd, pos)
+    }
+
+    /// Places a new CAN transceiver and returns its id.
+    pub fn add_can(&mut self, pos: Pos2) -> DeviceId {
+        self.add_device(DeviceKind::Can, pos)
+    }
+
+    /// Places a new LED matrix chain and returns its id.
+    pub fn add_matrix(&mut self, pos: Pos2) -> DeviceId {
+        self.add_device(DeviceKind::Matrix, pos)
+    }
+
     /// Mutable access to the placed devices.
     pub fn devices_mut(&mut self) -> &mut [Device] {
         &mut self.devices
     }
 
-    /// The MCU pin `pin` is wired to, if any (rails and other devices are not
-    /// resolved: only direct MCU connections are reported).
+    /// The MCU pin `pin` is wired to, if any (only a direct wire to an MCU pin
+    /// is reported; a pin behind another part is not resolved).
     pub fn mcu_pin_for(&self, pin: PinRef) -> Option<(u8, u8)> {
         for wire in &self.wires {
             let other = if wire.a == pin {
@@ -670,7 +823,7 @@ impl Board {
         let mut levels_of_nets = Vec::with_capacity(nets.len());
         let mut shorts = Vec::new();
         for net in &nets {
-            let level = net_level(net, levels);
+            let level = self.net_level(net, levels);
             if level == NetLevel::Shorted {
                 shorts.push(net.clone());
             }
@@ -707,6 +860,35 @@ impl Board {
             leds,
         }
     }
+
+    /// Effective level of one net.
+    fn net_level(&self, net: &[PinRef], levels: &PinLevels) -> NetLevel {
+        let mut high = false;
+        let mut low = false;
+        for node in net {
+            match node {
+                PinRef::Mcu { port, pin } => {
+                    if levels.level[*port as usize][*pin as usize] {
+                        high = true;
+                    } else {
+                        low = true;
+                    }
+                }
+                PinRef::Device { device, .. } => match self.device(*device).map(|d| d.kind) {
+                    Some(DeviceKind::Vcc) => high = true,
+                    Some(DeviceKind::Gnd) => low = true,
+                    // Signal parts do not drive anything in this phase.
+                    _ => {}
+                },
+            }
+        }
+        match (high, low) {
+            (true, true) => NetLevel::Shorted,
+            (true, false) => NetLevel::High,
+            (false, true) => NetLevel::Low,
+            (false, false) => NetLevel::Floating,
+        }
+    }
 }
 
 /// Effective level of one net.
@@ -717,32 +899,6 @@ pub enum NetLevel {
     Floating,
     /// VCC tied to GND, or a push-pull output fighting the rail.
     Shorted,
-}
-
-fn net_level(net: &[PinRef], levels: &PinLevels) -> NetLevel {
-    let mut high = false;
-    let mut low = false;
-    for node in net {
-        match node {
-            PinRef::Rail(Rail::Vcc) => high = true,
-            PinRef::Rail(Rail::Gnd) => low = true,
-            PinRef::Mcu { port, pin } => {
-                if levels.level[*port as usize][*pin as usize] {
-                    high = true;
-                } else {
-                    low = true;
-                }
-            }
-            // Devices do not drive anything in this phase.
-            PinRef::Device { .. } => {}
-        }
-    }
-    match (high, low) {
-        (true, true) => NetLevel::Shorted,
-        (true, false) => NetLevel::High,
-        (false, true) => NetLevel::Low,
-        (false, false) => NetLevel::Floating,
-    }
 }
 
 /// Pin levels read out of the simulated device.
@@ -785,6 +941,117 @@ impl BoardState {
     }
 }
 
+/// Views of the off-chip parts for the status windows.
+///
+/// The parts only exist while they are placed on the drawing, so the frame's
+/// snapshot is completed from the board instead of from the simulation.
+impl Board {
+    /// Copies the state of the placed transceiver and LED matrix into
+    /// `snapshot`, and appends their rows to the peripheral browser.
+    pub fn fill_snapshot(&self, snapshot: &mut crate::sim::Snapshot) {
+        if let Some(matrix) = self.matrices().first() {
+            snapshot.matrix = crate::sim::MatrixSnapshot::of(&matrix.borrow());
+        }
+
+        let transceivers = self.transceivers();
+        match transceivers.first() {
+            Some(handle) => {
+                let transceiver = handle.borrow();
+                snapshot
+                    .can
+                    .observe(&self.can_bus.borrow(), Some(&transceiver));
+            }
+            None => snapshot.can.observe(&self.can_bus.borrow(), None),
+        }
+
+        for device in &self.devices {
+            match &device.hardware {
+                Hardware::Matrix(matrix) => {
+                    let matrix = matrix.borrow();
+                    snapshot.peripherals.push(status(
+                        &device.name,
+                        "点阵显示（MAX7219）",
+                        matrix_rows(&matrix),
+                    ));
+                }
+                Hardware::Can(transceiver) => {
+                    let transceiver = transceiver.borrow();
+                    let bus = self.can_bus.borrow();
+                    let (tx, rx) = transceiver.pins();
+                    snapshot.peripherals.push(status(
+                        &device.name,
+                        "CAN 收发器（外部）",
+                        vec![
+                            ("节点", transceiver.name().to_string()),
+                            ("模式", transceiver.mode().label().to_string()),
+                            (
+                                "引脚",
+                                format!(
+                                    "TXD = {}，RXD = {}",
+                                    pin_label(tx),
+                                    pin_label(rx)
+                                ),
+                            ),
+                            ("已发送帧", format!("{}", transceiver.stats().tx_frames)),
+                            ("已接收帧", format!("{}", transceiver.stats().rx_frames)),
+                            ("回环帧", format!("{}", transceiver.stats().loopback_frames)),
+                            ("总线帧数", format!("{}", bus.stats().frames)),
+                            ("待投递", format!("{}", bus.pending(transceiver.node()))),
+                        ],
+                    ));
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+fn status(
+    name: &str,
+    kind: &'static str,
+    rows: Vec<(&'static str, String)>,
+) -> gsim_stm32f1::status::PeripheralStatus {
+    gsim_stm32f1::status::PeripheralStatus {
+        name: name.to_string(),
+        kind,
+        base: 0,
+        clock_hz: 0,
+        rows,
+    }
+}
+
+fn pin_label((port, pin): (u8, u8)) -> String {
+    format!(
+        "P{}{}",
+        gsim_stm32f1::PORT_NAMES
+            .get(usize::from(port))
+            .copied()
+            .unwrap_or("?"),
+        pin
+    )
+}
+
+/// Rows describing one LED matrix module in the peripheral browser.
+fn matrix_rows(matrix: &gsim_devices::Max7219) -> Vec<(&'static str, String)> {
+    let mut rows = vec![
+        ("级联片数", format!("{}", matrix.chips().len())),
+        ("LOAD 引脚", pin_label(matrix.cs_pin())),
+        ("SPI 单元", format!("SPI{}", matrix.unit() + 1)),
+        ("已接收字节", format!("{}", matrix.frames())),
+        ("已锁存字", format!("{}", matrix.words())),
+    ];
+    if let Some(chip) = matrix.chips().first() {
+        rows.push(("亮度", format!("{}/15", chip.intensity())));
+        rows.push(("扫描行", format!("{}", chip.scanned_rows())));
+        rows.push(("关断", if chip.enabled() { "否" } else { "是" }.to_string()));
+        rows.push((
+            "显示测试",
+            if chip.display_test() { "是" } else { "否" }.to_string(),
+        ));
+    }
+    rows
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -805,7 +1072,7 @@ mod tests {
     #[test]
     fn demo_board_lights_the_led_only_while_pa5_is_high() {
         let board = Board::demo();
-        let led = board.devices()[0].id;
+        let led = board.first_of(DeviceKind::Led).expect("demo LED").id;
 
         let state = board.evaluate(&levels(&[], &[(0, 5)]));
         assert!(state.led_lit(led), "LED must light when PA5 is high");
@@ -818,9 +1085,13 @@ mod tests {
     #[test]
     fn led_wired_to_vcc_and_a_low_pin_is_active_low() {
         let mut board = Board::new();
-        let led = board.add_led(Pos2::new(10.0, 10.0));
+        let vcc = board.add_vcc(Pos2::new(10.0, 10.0));
+        let led = board.add_led(Pos2::new(100.0, 10.0));
         assert!(board.connect(
-            PinRef::Rail(Rail::Vcc),
+            PinRef::Device {
+                device: vcc,
+                pin: POWER_PIN,
+            },
             PinRef::Device {
                 device: led,
                 pin: 0
@@ -876,7 +1147,18 @@ mod tests {
     #[test]
     fn rails_tied_together_report_a_short() {
         let mut board = Board::new();
-        assert!(board.connect(PinRef::Rail(Rail::Vcc), PinRef::Rail(Rail::Gnd)));
+        let vcc = board.add_vcc(Pos2::new(10.0, 10.0));
+        let gnd = board.add_gnd(Pos2::new(10.0, 90.0));
+        assert!(board.connect(
+            PinRef::Device {
+                device: vcc,
+                pin: POWER_PIN,
+            },
+            PinRef::Device {
+                device: gnd,
+                pin: POWER_PIN,
+            },
+        ));
         let state = board.evaluate(&levels(&[], &[]));
         assert_eq!(state.shorts.len(), 1);
         assert_eq!(state.levels_of_nets[0], NetLevel::Shorted);
@@ -885,8 +1167,12 @@ mod tests {
     #[test]
     fn duplicate_and_self_wires_are_rejected() {
         let mut board = Board::new();
+        let gnd = board.add_gnd(Pos2::new(10.0, 10.0));
         let a = PinRef::Mcu { port: 0, pin: 5 };
-        let b = PinRef::Rail(Rail::Gnd);
+        let b = PinRef::Device {
+            device: gnd,
+            pin: POWER_PIN,
+        };
         assert!(board.connect(a, b));
         assert!(!board.connect(a, b), "duplicate wire");
         assert!(!board.connect(b, a), "duplicate wire, reversed");
@@ -897,10 +1183,15 @@ mod tests {
     #[test]
     fn nets_merge_transitively() {
         let mut board = Board::new();
-        let led = board.add_led(Pos2::new(0.0, 0.0));
-        board.connect(PinRef::Mcu { port: 0, pin: 5 }, PinRef::Rail(Rail::Vcc));
+        board.add_vcc(Pos2::new(0.0, 0.0));
+        let vcc = PinRef::Device {
+            device: board.first_of(DeviceKind::Vcc).expect("vcc").id,
+            pin: POWER_PIN,
+        };
+        let led = board.add_led(Pos2::new(100.0, 0.0));
+        board.connect(PinRef::Mcu { port: 0, pin: 5 }, vcc);
         board.connect(
-            PinRef::Rail(Rail::Vcc),
+            vcc,
             PinRef::Device {
                 device: led,
                 pin: 0,
@@ -914,7 +1205,7 @@ mod tests {
     #[test]
     fn removing_a_device_drops_its_wires() {
         let mut board = Board::demo();
-        let led = board.devices()[0].id;
+        let led = board.first_of(DeviceKind::Led).expect("demo LED").id;
         let before = board.wires().len();
         board.remove_device(led);
         assert!(board.device(led).is_none());
@@ -930,15 +1221,21 @@ mod tests {
     }
 
     #[test]
-    fn the_demo_board_ships_all_three_parts() {
+    fn the_demo_board_ships_the_power_symbols_and_three_parts() {
         let board = Board::demo();
         let kinds: Vec<DeviceKind> = board.devices().iter().map(|device| device.kind).collect();
         assert_eq!(
             kinds,
-            vec![DeviceKind::Led, DeviceKind::Uart, DeviceKind::Encoder]
+            vec![
+                DeviceKind::Vcc,
+                DeviceKind::Gnd,
+                DeviceKind::Led,
+                DeviceKind::Uart,
+                DeviceKind::Encoder
+            ]
         );
-        assert_eq!(board.devices()[1].name, "UART1");
-        assert_eq!(board.devices()[2].name, "ENC1");
+        assert_eq!(board.first_of(DeviceKind::Uart).unwrap().name, "UART1");
+        assert_eq!(board.first_of(DeviceKind::Encoder).unwrap().name, "ENC1");
         // LED: 2 wires, UART: 2 wires, encoder: 3 wires.
         assert_eq!(board.wires().len(), 7);
     }
@@ -960,9 +1257,14 @@ mod tests {
         board.connect(tx, PinRef::Mcu { port: 0, pin: 10 });
         assert_eq!(board.mcu_pin_for(rx), Some((0, 9)));
         assert_eq!(board.mcu_pin_for(tx), Some((0, 10)));
-        // A rail is not an MCU pin.
-        board.connect(PinRef::Rail(Rail::Gnd), PinRef::Rail(Rail::Vcc));
-        assert_eq!(board.mcu_pin_for(PinRef::Rail(Rail::Gnd)), None);
+        // A power symbol is just another device pin.
+        let gnd = board.add_gnd(Pos2::new(0.0, 100.0));
+        let gnd_pin = PinRef::Device {
+            device: gnd,
+            pin: POWER_PIN,
+        };
+        board.connect(gnd_pin, PinRef::Mcu { port: 0, pin: 0 });
+        assert_eq!(board.mcu_pin_for(gnd_pin), Some((0, 0)));
     }
 
     #[test]

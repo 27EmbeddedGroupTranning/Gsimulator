@@ -7,10 +7,11 @@
 //! Two sources can drive the device:
 //!
 //! * a real ELF firmware image executed on the Cortex-M3 core, or
-//! * a built-in stimulus that toggles `PA5` through `GPIOA->BSRR` the way a
-//!   firmware would, so wiring can be tried out without compiling anything.
-//!   It starts by default and can be switched off again, which leaves the
-//!   simulation idle and releases `PA5`.
+//! * a built-in stimulus that toggles a configurable pin through `GPIOx->BSRR`
+//!   the way a firmware would, so wiring can be tried out without compiling
+//!   anything. Its pin, waveform (square/constant/expression), half period and
+//!   duty cycle live in [`StimulusConfig`]; it starts by default and can be
+//!   switched off again, which leaves the simulation idle and releases the pin.
 
 use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
@@ -44,13 +45,11 @@ fn square_durations(half_period_ns: u64, duty: f32) -> (u64, u64) {
     let low = period.saturating_sub(high).max(1);
     (high, low)
 }
-/// Maximum number of bus frames handed to the controller in one service call.
-const MAX_CAN_FRAMES_PER_STEP: usize = 64;
 
 /// What drives the pins.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Source {
-    /// Nothing loaded yet.
+    /// Nothing drives the pins; the simulated clock still advances.
     Idle,
     /// The configurable built-in stimulus.
     Stimulus,
@@ -175,6 +174,15 @@ pub struct MatrixSnapshot {
 }
 
 impl MatrixSnapshot {
+    /// Captures the state of a MAX7219 chain that is wired to the board.
+    pub fn of(matrix: &Max7219) -> Self {
+        MatrixSnapshot {
+            chips: matrix.chips().to_vec(),
+            frames: matrix.frames(),
+            words: matrix.words(),
+        }
+    }
+
     /// Pixels of the first die, `rows[row][column]`.
     pub fn pixels(&self) -> [[bool; 8]; 8] {
         self.chips
@@ -211,6 +219,32 @@ pub struct CanSnapshot {
     pub node: u32,
     pub node_name: String,
     pub pending: usize,
+}
+
+impl CanSnapshot {
+    /// Fills the bus, transceiver and log part of the snapshot.
+    ///
+    /// `transceiver` is `None` while no CAN part is placed on the schematic.
+    pub fn observe(&mut self, bus: &CanBus, transceiver: Option<&CanTransceiver>) {
+        self.records = bus.records().iter().cloned().collect();
+        self.bus = bus.stats();
+        match transceiver {
+            Some(transceiver) => {
+                self.transceiver = transceiver.stats();
+                self.mode = transceiver.mode();
+                self.node = transceiver.node();
+                self.node_name = transceiver.name().to_string();
+                self.pending = bus.pending(transceiver.node());
+            }
+            None => {
+                self.transceiver = TransceiverStats::default();
+                self.mode = TransceiverMode::Normal;
+                self.node = 0;
+                self.node_name = "（未放置收发器）".to_string();
+                self.pending = 0;
+            }
+        }
+    }
 }
 
 impl Default for CanSnapshot {
@@ -271,11 +305,9 @@ pub struct Simulation {
     stimulus_expr: Option<Expression>,
     stimulus_high: bool,
     stimulus_next_ns: u64,
-    /// 8x8 LED matrix wired to SPI1 (`PA5`/`PA7`) with `PA4` as LOAD.
-    matrix: Rc<RefCell<Max7219>>,
-    /// CAN transceiver between CAN1 and the virtual bus.
-    transceiver: Rc<RefCell<CanTransceiver>>,
-    bus: Rc<RefCell<CanBus>>,
+    /// Matrix whose `DOUT` primes the `MISO` line of the port it is wired to.
+    /// Attached by the bridge, which owns the wiring knowledge.
+    matrix: Option<Rc<RefCell<Max7219>>>,
     /// Approximate timestamp handed to events while the SoC is stepping.
     event_clock_ns: Rc<Cell<u64>>,
     /// Events produced since the front end last drained them.
@@ -309,24 +341,8 @@ impl Simulation {
                 }
             }));
 
-        let matrix = Rc::new(RefCell::new(Max7219::firmware_default()));
-        let bus = Rc::new(RefCell::new(CanBus::new()));
-        let transceiver = Rc::new(RefCell::new(CanTransceiver::attach(
-            Rc::clone(&bus),
-            "CAN1 节点",
-            0,
-        )));
+        let matrix = None;
         let event_clock_ns = Rc::new(Cell::new(0u64));
-
-        let sink_matrix = Rc::clone(&matrix);
-        let sink_can = Rc::clone(&transceiver);
-        let sink_clock = Rc::clone(&event_clock_ns);
-        soc.borrow_mut()
-            .add_event_sink(Box::new(move |event: &Event| {
-                let now = sink_clock.get();
-                sink_matrix.borrow_mut().on_event(event);
-                sink_can.borrow_mut().on_event(event, now);
-            }));
 
         let mut simulation = Simulation {
             soc,
@@ -341,8 +357,6 @@ impl Simulation {
             stimulus_high: false,
             stimulus_next_ns: 0,
             matrix,
-            transceiver,
-            bus,
             event_clock_ns,
             events,
         };
@@ -389,8 +403,10 @@ impl Simulation {
         self.running
     }
 
+    /// Run/pause is independent of what drives the pins: an idle simulation
+    /// still advances its clock, so peripherals and the CAN bus stay live.
     pub fn set_running(&mut self, running: bool) {
-        self.running = running && self.source != Source::Idle;
+        self.running = running;
     }
 
     pub fn toggle_running(&mut self) {
@@ -513,11 +529,12 @@ impl Simulation {
         self.begin_stimulus_waveform();
     }
 
-    /// Switches the built-in stimulus off and leaves the simulation idle.
+    /// Switches the built-in stimulus off, leaving the pins untouched.
     ///
     /// The configured pin is driven low and handed back as a floating input,
-    /// so the wiring stops seeing activity instead of freezing at the last
-    /// level. Calling this while a firmware is loaded does nothing.
+    /// so the wiring stops seeing activity. The simulated clock keeps running
+    /// (or stays paused) exactly as before: only the pin driver is removed.
+    /// Calling this while a firmware is loaded does nothing.
     pub fn stop_stimulus(&mut self) {
         if self.source != Source::Stimulus {
             return;
@@ -541,7 +558,6 @@ impl Simulation {
         }
 
         self.source = Source::Idle;
-        self.running = false;
         self.halt = None;
         self.stimulus_high = false;
         self.stimulus_next_ns = 0;
@@ -610,17 +626,17 @@ impl Simulation {
                 self.start_stimulus();
             }
             Source::Idle => {
-                // Nothing was driving the pins, so a reset must not silently
-                // switch the built-in stimulus back on.
+                // Nothing drives the pins, so a reset must not silently switch
+                // the built-in stimulus back on - but the clock keeps its
+                // run/pause state like any other reset.
                 self.soc.borrow_mut().system_reset(0);
-                self.running = false;
                 self.halt = None;
             }
         }
     }
 
     /// Advances one frame: `budget` instructions, or the equivalent amount of
-    /// simulated time when the built-in stimulus is driving.
+    /// simulated time at the current clock.
     pub fn advance_frame(&mut self, budget: u32) {
         if !self.running || budget == 0 {
             return;
@@ -636,31 +652,54 @@ impl Simulation {
         match self.source.clone() {
             Source::Firmware(_) => self.run_firmware(budget),
             Source::Stimulus => {
-                let sysclk = u64::from(self.soc.borrow().clocks().sysclk_hz.max(1));
-                let ns = u64::from(budget).saturating_mul(1_000_000_000) / sysclk;
+                let ns = self.budget_ns(budget);
                 self.advance_stimulus(ns);
                 self.advance_devices();
             }
-            Source::Idle => {}
+            Source::Idle => {
+                // No pin driver, but the clock is still the simulation clock:
+                // peripherals keep ticking so devices and the CAN bus stay live.
+                let ns = self.budget_ns(budget);
+                self.soc.borrow_mut().advance_ns(ns);
+                self.advance_devices();
+            }
         }
+    }
+
+    /// Converts an instruction budget into simulated time at the current clock.
+    fn budget_ns(&self, budget: u32) -> u64 {
+        let sysclk = u64::from(self.soc.borrow().clocks().sysclk_hz.max(1));
+        u64::from(budget).saturating_mul(1_000_000_000) / sysclk
     }
 
     /// Pushes the external devices one step forward: primes the `MISO` line of
     /// the LED matrix and hands every frame the bus delivered to the CAN
     /// controller.
+    /// Points the `MISO` line of the wired SPI port at `matrix`, or detaches
+    /// the matrix from the SPI bus when `None`.
+    ///
+    /// The bridge calls this every slice, so unplugging the part (or wiring it
+    /// elsewhere) takes effect on the next one.
+    pub fn attach_matrix(&mut self, matrix: Option<Rc<RefCell<Max7219>>>) {
+        self.matrix = matrix;
+    }
+
+    /// Hands a frame the transceiver received to the bxCAN controller.
+    pub fn receive_can(&mut self, unit: u8, frame: gsim_core::CanFrame) {
+        self.event_clock_ns.set(self.now_ns());
+        self.soc.borrow_mut().can_receive(usize::from(unit), frame);
+    }
+
+    /// Pushes the external devices one step forward: primes the `MISO` line of
+    /// the wired LED matrix so the core reads back what the chain shifts out.
     fn advance_devices(&mut self) {
         self.event_clock_ns.set(self.now_ns());
-        let (unit, miso) = {
-            let matrix = self.matrix.borrow();
-            (usize::from(matrix.unit()), matrix.miso())
-        };
-        self.soc.borrow_mut().spi_set_miso(unit, miso);
-        for _ in 0..MAX_CAN_FRAMES_PER_STEP {
-            let frame = self.transceiver.borrow_mut().poll();
-            let Some(frame) = frame else {
-                break;
+        if let Some(matrix) = &self.matrix {
+            let (unit, miso) = {
+                let matrix = matrix.borrow();
+                (usize::from(matrix.unit()), matrix.miso())
             };
-            self.soc.borrow_mut().can_receive(0, frame);
+            self.soc.borrow_mut().spi_set_miso(unit, miso);
         }
     }
 
@@ -770,17 +809,23 @@ impl Simulation {
     pub fn snapshot(&self) -> Snapshot {
         let levels = self.pin_levels();
         let soc = self.soc.borrow();
-        let matrix = self.matrix.borrow();
-        let transceiver = self.transceiver.borrow();
-        let bus = self.bus.borrow();
         let controller = soc
             .can
             .status(&soc.clocks())
             .into_iter()
             .collect::<Vec<_>>();
+        let source_label = match &self.source {
+            Source::Idle => "空闲：没有引脚驱动源（时钟照常推进）".to_string(),
+            Source::Stimulus => self.stimulus.label(),
+            Source::Firmware(path) => format!(
+                "固件：{}",
+                path.file_name().unwrap_or_default().to_string_lossy()
+            ),
+        };
         Snapshot {
             running: self.running,
             source: self.source.clone(),
+            source_label,
             now_ns: soc.now_ns(),
             instructions: self.cpu.as_ref().map(Cpu::instructions).unwrap_or(0),
             interrupts: self.cpu.as_ref().map(Cpu::interrupts).unwrap_or(0),
@@ -791,114 +836,22 @@ impl Simulation {
             uart: self.uart.borrow().clone(),
             halt: self.halt.clone(),
             pc: self.cpu.as_ref().map(Cpu::pc),
-            stimulus: (self.source == Source::Stimulus).then_some(StimulusState {
+            stimulus: (self.source == Source::Stimulus).then(|| StimulusState {
+                config: self.stimulus.clone(),
                 high: self.stimulus_high,
-                next_toggle_ns: self.stimulus_next_ns,
+                next_toggle_ns: matches!(self.stimulus.waveform, StimulusWaveform::Square { .. })
+                    .then_some(self.stimulus_next_ns),
             }),
-            peripherals: {
-                let mut list = soc.peripheral_status();
-                list.push(PeripheralStatus {
-                    name: "MAX7219".to_string(),
-                    kind: "点阵显示（外部）",
-                    base: 0,
-                    clock_hz: 0,
-                    rows: matrix_rows(&matrix),
-                });
-                list.push(PeripheralStatus {
-                    name: "CAN 收发器".to_string(),
-                    kind: "总线收发器（外部）",
-                    base: 0,
-                    clock_hz: 0,
-                    rows: vec![
-                        ("节点", transceiver.name().to_string()),
-                        ("模式", transceiver.mode().label().to_string()),
-                        (
-                            "引脚",
-                            format!(
-                                "TXD = P{}{}，RXD = P{}{}",
-                                gsim_stm32f1::PORT_NAMES[usize::from(transceiver.pins().0 .0)],
-                                transceiver.pins().0 .1,
-                                gsim_stm32f1::PORT_NAMES[usize::from(transceiver.pins().1 .0)],
-                                transceiver.pins().1 .1
-                            ),
-                        ),
-                        ("已发送帧", format!("{}", transceiver.stats().tx_frames)),
-                        ("已接收帧", format!("{}", transceiver.stats().rx_frames)),
-                        ("回环帧", format!("{}", transceiver.stats().loopback_frames)),
-                        ("总线帧数", format!("{}", bus.stats().frames)),
-                        ("待投递", format!("{}", bus.pending(transceiver.node()))),
-                    ],
-                });
-                list
-            },
-            matrix: MatrixSnapshot {
-                chips: matrix.chips().to_vec(),
-                frames: matrix.frames(),
-                words: matrix.words(),
-            },
+            // The off-chip parts live on the board, so `Board::fill_snapshot`
+            // completes these after the frame is taken.
+            peripherals: soc.peripheral_status(),
+            matrix: MatrixSnapshot::default(),
             can: CanSnapshot {
                 controller,
-                records: bus.records().iter().cloned().collect(),
-                bus: bus.stats(),
-                transceiver: transceiver.stats(),
-                mode: transceiver.mode(),
-                node: transceiver.node(),
-                node_name: transceiver.name().to_string(),
-                pending: bus.pending(transceiver.node()),
+                ..CanSnapshot::default()
             },
         }
     }
-
-    /// Puts a frame on the virtual bus as if another ECU had sent it.
-    pub fn inject_can_frame(&mut self, frame: gsim_core::CanFrame) {
-        let now = self.now_ns();
-        self.bus.borrow_mut().inject(frame, now);
-    }
-
-    /// Switches the transceiver between normal, listen-only and standby.
-    pub fn set_transceiver_mode(&mut self, mode: TransceiverMode) {
-        self.transceiver.borrow_mut().set_mode(mode);
-    }
-
-    pub fn transceiver_mode(&self) -> TransceiverMode {
-        self.transceiver.borrow().mode()
-    }
-
-    pub fn clear_can_log(&mut self) {
-        self.bus.borrow_mut().clear_records();
-    }
-}
-
-/// Rows describing the LED matrix module in the peripheral browser.
-fn matrix_rows(matrix: &Max7219) -> Vec<(&'static str, String)> {
-    let (port, pin) = matrix.cs_pin();
-    let mut rows = vec![
-        ("级联片数", format!("{}", matrix.chips().len())),
-        (
-            "LOAD 引脚",
-            format!(
-                "P{}{}",
-                gsim_stm32f1::PORT_NAMES
-                    .get(usize::from(port))
-                    .copied()
-                    .unwrap_or("?"),
-                pin
-            ),
-        ),
-        ("SPI 单元", format!("SPI{}", matrix.unit() + 1)),
-        ("已接收字节", format!("{}", matrix.frames())),
-        ("已锁存字", format!("{}", matrix.words())),
-    ];
-    if let Some(chip) = matrix.chips().first() {
-        rows.push(("亮度", format!("{}/15", chip.intensity())));
-        rows.push(("扫描行", format!("{}", chip.scanned_rows())));
-        rows.push(("关断", if chip.enabled() { "否" } else { "是" }.to_string()));
-        rows.push((
-            "显示测试",
-            if chip.display_test() { "是" } else { "否" }.to_string(),
-        ));
-    }
-    rows
 }
 
 /// Turns an emulation failure into a message that names the offending address

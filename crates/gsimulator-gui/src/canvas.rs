@@ -10,7 +10,7 @@ use egui::{Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, V
 use gsim_devices::Direction;
 
 use crate::board::{
-    Board, BoardState, DeviceId, DeviceKind, NetLevel, PinLevels, PinRef, Rail, Side, STUB,
+    Board, BoardState, DeviceId, DeviceKind, NetLevel, PinLevels, PinRef, Side, STUB,
 };
 use crate::library::DeviceDrag;
 
@@ -52,7 +52,6 @@ pub enum Selection {
 #[derive(Clone, Copy, Debug)]
 enum Drag {
     Device { id: DeviceId, grab: Vec2 },
-    Rail { rail: Rail, grab: Vec2 },
 }
 
 /// Persistent view and interaction state of the canvas.
@@ -319,26 +318,12 @@ impl Schematic {
                         grab: point - device.pos,
                     });
                     self.selected = Some(Selection::Device(id));
-                } else if let Some(rail) = self.rail_at(board, point) {
-                    self.drag = Some(Drag::Rail {
-                        rail,
-                        grab: point - board.rail_pos(rail),
-                    });
                 }
             }
         }
-        if let (Some(drag), Some(point)) = (self.drag, pointer_board) {
-            match drag {
-                Drag::Device { id, grab } => {
-                    if let Some(device) = board.device_mut(id) {
-                        device.pos = point - grab;
-                    }
-                }
-                Drag::Rail { rail, grab } => {
-                    if let Some(node) = board.rail_mut(rail) {
-                        node.pos = point - grab;
-                    }
-                }
+        if let (Some(Drag::Device { id, grab }), Some(point)) = (self.drag, pointer_board) {
+            if let Some(device) = board.device_mut(id) {
+                device.pos = point - grab;
             }
         }
         if response.drag_stopped() {
@@ -393,9 +378,6 @@ impl Schematic {
         self.paint_wires(&painter, origin, board, state);
         for device in board.devices() {
             self.paint_device(&painter, origin, device, state.led_lit(device.id));
-        }
-        for rail in Rail::ALL {
-            self.paint_rail(&painter, origin, board, rail);
         }
         self.paint_mcu(&painter, origin, levels, hover_pin);
 
@@ -462,11 +444,6 @@ impl Schematic {
                 }
             }
         }
-        for rail in Rail::ALL {
-            if board.rail_pos(rail).distance(point) <= radius {
-                return Some(PinRef::Rail(rail));
-            }
-        }
         None
     }
 
@@ -489,12 +466,6 @@ impl Schematic {
             .map(|device| device.id)
     }
 
-    fn rail_at(&self, board: &Board, point: Pos2) -> Option<Rail> {
-        Rail::ALL.into_iter().find(|rail| {
-            Rect::from_center_size(board.rail_pos(*rail), Vec2::splat(34.0)).contains(point)
-        })
-    }
-
     fn wire_at(&self, board: &Board, point: Pos2) -> Option<usize> {
         let tolerance = 6.0;
         board.wires().iter().position(|wire| {
@@ -513,7 +484,6 @@ impl Schematic {
                 .into_iter()
                 .find(|(p, n, _, _)| *p == port && *n == pin)
                 .map(|(_, _, _, pos)| pos),
-            PinRef::Rail(rail) => Some(board.rail_pos(rail)),
             PinRef::Device { device, pin } => {
                 board.device(device).map(|device| device.pin_pos(pin))
             }
@@ -675,59 +645,141 @@ impl Schematic {
         }
     }
 
-    fn paint_rail(&self, painter: &egui::Painter, origin: Pos2, board: &Board, rail: Rail) {
-        let pos = self.to_screen(board.rail_pos(rail), origin);
-        let color = match rail {
-            Rail::Vcc => COLOR_VCC,
-            Rail::Gnd => COLOR_GND,
+    /// Power symbol drawn instead of a part body: an up arrow for `VCC`, the
+    /// shrinking bars of a ground symbol for `GND`.
+    fn paint_power_symbol(
+        &self,
+        painter: &egui::Painter,
+        rect: Rect,
+        kind: DeviceKind,
+        selected: bool,
+    ) {
+        let base = match kind {
+            DeviceKind::Vcc => COLOR_VCC,
+            _ => COLOR_GND,
         };
-        let text = if rail.is_high() { "VCC" } else { "GND" };
-        let len = 14.0 * self.zoom;
-        match rail {
-            Rail::Vcc => {
+        let center = rect.center();
+        let len = (rect.height() * 0.28).max(5.0);
+        if selected {
+            painter.rect_stroke(
+                rect.expand(3.0 * self.zoom),
+                5.0 * self.zoom,
+                Stroke::new(self.stroke(1.2), COLOR_WIRE_SELECTED),
+                StrokeKind::Outside,
+            );
+        }
+        match kind {
+            DeviceKind::Vcc => {
+                let top = Pos2::new(center.x, center.y - len);
                 painter.line_segment(
-                    [
-                        Pos2::new(pos.x, pos.y - len),
-                        Pos2::new(pos.x, pos.y + len * 0.5),
-                    ],
-                    Stroke::new(self.stroke(1.8), color),
+                    [Pos2::new(center.x, center.y + len * 0.6), top],
+                    Stroke::new(self.stroke(2.0), base),
                 );
                 painter.line_segment(
-                    [
-                        Pos2::new(pos.x - len * 0.55, pos.y - len * 0.5),
-                        Pos2::new(pos.x, pos.y - len),
-                    ],
-                    Stroke::new(self.stroke(1.8), color),
+                    [Pos2::new(center.x - len * 0.6, center.y - len * 0.4), top],
+                    Stroke::new(self.stroke(2.0), base),
                 );
                 painter.line_segment(
-                    [
-                        Pos2::new(pos.x + len * 0.55, pos.y - len * 0.5),
-                        Pos2::new(pos.x, pos.y - len),
-                    ],
-                    Stroke::new(self.stroke(1.8), color),
+                    [Pos2::new(center.x + len * 0.6, center.y - len * 0.4), top],
+                    Stroke::new(self.stroke(2.0), base),
                 );
             }
-            Rail::Gnd => {
-                for (index, width) in [1.0f32, 0.66, 0.33].into_iter().enumerate() {
-                    let y = pos.y + len * 0.35 * index as f32;
+            _ => {
+                for (index, width) in [1.1f32, 0.75, 0.4].into_iter().enumerate() {
+                    let y = center.y - len * 0.4 + len * 0.55 * index as f32;
                     painter.line_segment(
                         [
-                            Pos2::new(pos.x - len * width, y),
-                            Pos2::new(pos.x + len * width, y),
+                            Pos2::new(center.x - len * width, y),
+                            Pos2::new(center.x + len * width, y),
                         ],
-                        Stroke::new(self.stroke(1.8), color),
+                        Stroke::new(self.stroke(2.0), base),
                     );
                 }
+                painter.line_segment(
+                    [Pos2::new(center.x, center.y - len * 0.9), Pos2::new(center.x, center.y - len * 0.4)],
+                    Stroke::new(self.stroke(2.0), base),
+                );
             }
         }
-        painter.circle_stroke(pos, self.stroke(5.0), Stroke::new(self.stroke(1.2), color));
+    }
+
+    /// Transceiver box: the mode plus the frame counters of the part.
+    fn paint_can_symbol(
+        &self,
+        painter: &egui::Painter,
+        rect: Rect,
+        base: Color32,
+        device: &crate::board::Device,
+    ) {
+        let Some(transceiver) = device.hardware.can() else {
+            return;
+        };
+        let transceiver = transceiver.borrow();
+        let left = rect.left() + 8.0 * self.zoom;
         painter.text(
-            Pos2::new(pos.x, pos.y + len * 1.35),
-            Align2::CENTER_TOP,
-            text,
+            Pos2::new(left, rect.top() + 7.0 * self.zoom),
+            Align2::LEFT_TOP,
+            "CAN",
             self.font(9.5),
-            color,
+            base,
         );
+        painter.text(
+            Pos2::new(left, rect.center().y - 2.0 * self.zoom),
+            Align2::LEFT_CENTER,
+            transceiver.mode().label(),
+            self.font(9.0),
+            COLOR_TEXT,
+        );
+        painter.text(
+            Pos2::new(left, rect.bottom() - 7.0 * self.zoom),
+            Align2::LEFT_BOTTOM,
+            format!(
+                "↑{} ↓{}",
+                transceiver.stats().tx_frames,
+                transceiver.stats().rx_frames
+            ),
+            self.font(8.5),
+            COLOR_DIM,
+        );
+    }
+
+    /// 8x8 window of the first die of the chain.
+    fn paint_matrix_symbol(
+        &self,
+        painter: &egui::Painter,
+        rect: Rect,
+        base: Color32,
+        device: &crate::board::Device,
+    ) {
+        let Some(matrix) = device.hardware.matrix() else {
+            return;
+        };
+        let matrix = matrix.borrow();
+        let pixels = matrix
+            .chips()
+            .first()
+            .map(|chip| chip.pixels())
+            .unwrap_or([[false; 8]; 8]);
+        let grid = rect.shrink(8.0 * self.zoom);
+        let cell = grid.width().min(grid.height()) / 8.0;
+        let origin = Pos2::new(
+            grid.center().x - cell * 4.0,
+            grid.center().y - cell * 4.0,
+        );
+        for (row, line) in pixels.iter().enumerate() {
+            for (column, lit) in line.iter().enumerate() {
+                let min = Pos2::new(
+                    origin.x + column as f32 * cell + cell * 0.12,
+                    origin.y + row as f32 * cell + cell * 0.12,
+                );
+                let dot = Rect::from_min_size(min, Vec2::splat(cell * 0.76));
+                painter.rect_filled(
+                    dot,
+                    cell * 0.15,
+                    if *lit { base } else { Color32::from_rgb(46, 52, 62) },
+                );
+            }
+        }
     }
 
     fn paint_device(
@@ -743,43 +795,54 @@ impl Schematic {
         );
         let selected = self.selected == Some(Selection::Device(device.id));
         let base = device.accent.color32();
-        let body = if lit {
-            Color32::from_rgb(24 + base.r() / 3, 26 + base.g() / 4, 30 + base.b() / 4)
+        if device.kind.is_power() {
+            self.paint_power_symbol(painter, rect, device.kind, selected);
         } else {
-            Color32::from_rgb(38, 42, 50)
-        };
-        if lit {
-            // Soft halo so a lit LED reads as "emitting" at any zoom level.
-            let glow = Color32::from_rgba_unmultiplied(base.r(), base.g(), base.b(), 26);
-            painter.circle_filled(rect.center(), rect.width() * 0.42, glow);
-            let inner = Color32::from_rgba_unmultiplied(base.r(), base.g(), base.b(), 40);
-            painter.circle_filled(rect.center(), rect.width() * 0.30, inner);
-        }
-        painter.rect_filled(rect, 7.0 * self.zoom, body);
-        painter.rect_stroke(
-            rect,
-            7.0 * self.zoom,
-            Stroke::new(
-                self.stroke(if selected { 1.8 } else { 1.2 }),
-                if selected {
-                    COLOR_WIRE_SELECTED
-                } else {
-                    COLOR_MCU_EDGE
-                },
-            ),
-            StrokeKind::Inside,
-        );
+            let body = if lit {
+                Color32::from_rgb(24 + base.r() / 3, 26 + base.g() / 4, 30 + base.b() / 4)
+            } else {
+                Color32::from_rgb(38, 42, 50)
+            };
+            if lit {
+                // Soft halo so a lit LED reads as "emitting" at any zoom level.
+                let glow = Color32::from_rgba_unmultiplied(base.r(), base.g(), base.b(), 26);
+                painter.circle_filled(rect.center(), rect.width() * 0.42, glow);
+                let inner = Color32::from_rgba_unmultiplied(base.r(), base.g(), base.b(), 40);
+                painter.circle_filled(rect.center(), rect.width() * 0.30, inner);
+            }
+            painter.rect_filled(rect, 7.0 * self.zoom, body);
+            painter.rect_stroke(
+                rect,
+                7.0 * self.zoom,
+                Stroke::new(
+                    self.stroke(if selected { 1.8 } else { 1.2 }),
+                    if selected {
+                        COLOR_WIRE_SELECTED
+                    } else {
+                        COLOR_MCU_EDGE
+                    },
+                ),
+                StrokeKind::Inside,
+            );
 
-        match device.kind {
-            DeviceKind::Led => self.paint_led_symbol(painter, rect, base, lit),
-            DeviceKind::Uart => self.paint_uart_symbol(painter, rect, base, device),
-            DeviceKind::Encoder => self.paint_encoder_symbol(painter, rect, base, device),
+            match device.kind {
+                DeviceKind::Led => self.paint_led_symbol(painter, rect, base, lit),
+                DeviceKind::Uart => self.paint_uart_symbol(painter, rect, base, device),
+                DeviceKind::Encoder => self.paint_encoder_symbol(painter, rect, base, device),
+                DeviceKind::Can => self.paint_can_symbol(painter, rect, base, device),
+                DeviceKind::Matrix => self.paint_matrix_symbol(painter, rect, base, device),
+                DeviceKind::Vcc | DeviceKind::Gnd => {}
+            }
         }
 
         painter.text(
             Pos2::new(rect.center().x, rect.top() - 8.0 * self.zoom),
             Align2::CENTER_BOTTOM,
-            &device.name,
+            match device.kind {
+                DeviceKind::Vcc => "VCC",
+                DeviceKind::Gnd => "GND",
+                _ => device.name.as_str(),
+            },
             self.font(10.0),
             COLOR_TEXT,
         );
@@ -813,15 +876,8 @@ impl Schematic {
         }
     }
 
-    /// Triangle, bar and emission arrows.
     /// Translucent preview of the part waiting for its placement click.
-    fn paint_ghost(
-        &self,
-        painter: &egui::Painter,
-        origin: Pos2,
-        kind: DeviceKind,
-        center: Pos2,
-    ) {
+    fn paint_ghost(&self, painter: &egui::Painter, origin: Pos2, kind: DeviceKind, center: Pos2) {
         let body = Rect::from_min_size(center - kind.body_size() * 0.5, kind.body_size());
         let rect = Rect::from_min_max(
             self.to_screen(body.min, origin),
@@ -874,6 +930,7 @@ impl Schematic {
         }
     }
 
+    /// Triangle, bar and emission arrows.
     fn paint_led_symbol(&self, painter: &egui::Painter, rect: Rect, base: Color32, lit: bool) {
         let center = rect.center();
         let s = (rect.height() * 0.22).max(5.0);
@@ -1075,12 +1132,6 @@ pub fn content_bounds(board: &Board) -> Rect {
         Pos2::new(mcu.left() - MCU_STUB, mcu.top()),
         Pos2::new(mcu.right() + MCU_STUB, mcu.bottom()),
     );
-    for rail in Rail::ALL {
-        bounds = bounds.union(Rect::from_center_size(
-            board.rail_pos(rail),
-            Vec2::splat(60.0),
-        ));
-    }
     for device in board.devices() {
         let rect = device.rect();
         bounds = bounds.union(Rect::from_min_max(
@@ -1208,14 +1259,9 @@ mod tests {
         let mut schematic = Schematic::default();
         let pointer = Pos2::new(300.0, 600.0);
 
-        let mut frame = |events: Vec<egui::Event>,
-                         schematic: &mut Schematic,
-                         board: &mut Board| {
+        let frame = |events: Vec<egui::Event>, schematic: &mut Schematic, board: &mut Board| {
             let input = egui::RawInput {
-                screen_rect: Some(Rect::from_min_size(
-                    Pos2::ZERO,
-                    Vec2::new(900.0, 700.0),
-                )),
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(900.0, 700.0))),
                 events,
                 ..Default::default()
             };

@@ -201,7 +201,7 @@ fn print_memory_map() {
 
     println!("STM32F103 memory map (as simulated)");
     println!("{:<26} {:<12} size", "region", "base");
-    let regions: [(&str, u32, u32); 27] = [
+    let regions: [(&str, u32, u32); 28] = [
         ("flash", map::FLASH_BASE, map::FLASH_SIZE),
         ("flash alias", 0x0000_0000, map::FLASH_SIZE),
         ("sram", map::SRAM_BASE, map::SRAM_SIZE),
@@ -228,6 +228,7 @@ fn print_memory_map() {
         ("USART1", map::usart::BASE_1, 0x400),
         ("DMA1", map::dma1::BASE, 0x400),
         ("DMA2", map::dma2::BASE, 0x400),
+        ("CAN1", map::can::BASE_1, 0x400),
         ("RCC", map::rcc::BASE, 0x400),
     ];
     for (name, base, size) in regions {
@@ -263,5 +264,9 @@ fn print_memory_map() {
         bitband::ALIAS_SIZE
     );
     println!();
-    println!("Not modelled in phase 1: CAN controller, external SPI/I2C devices, virtual CAN bus.");
+    println!(
+        "Off-chip models (gsim-devices): MAX7219 8x8 LED matrix on SPI1 (PA4 LOAD) \
+         and a CAN transceiver with a shared virtual bus on CAN1."
+    );
+    println!("Not modelled: CAN2/USB, external I2C devices, bit level CAN arbitration.");
 }

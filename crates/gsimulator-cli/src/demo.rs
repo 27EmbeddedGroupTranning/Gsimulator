@@ -4,18 +4,19 @@
 //! writes and reads, and prints a transcript of what the modelled hardware
 //! does in response. It needs no ELF file and no cross compiler.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::io::Write;
 use std::rc::Rc;
 
 use gsim_core::irq::{exception, lines};
-use gsim_core::{AccessWidth, Event, EventSink, MemoryBus};
+use gsim_core::{AccessWidth, CanFrame, Event, EventSink, MemoryBus};
+use gsim_devices::{CanBus, CanTransceiver, Max7219};
 use gsim_stm32f1::{map, Soc};
 
 /// Runs the demonstration and prints its transcript.
 pub fn run() -> Result<(), String> {
-    println!("Gsimulator - STM32F103 on-chip peripheral demo (phase 1)");
-    println!("------------------------------------------------------");
+    println!("Gsimulator - STM32F103 peripheral demo (on-chip blocks + off-chip parts)");
+    println!("----------------------------------------------------------------------");
 
     let soc = Rc::new(RefCell::new(Soc::new()));
     let sink = ConsoleSink;
@@ -30,6 +31,7 @@ pub fn run() -> Result<(), String> {
     i2c(&soc)?;
     systick(&soc);
     watchdog(&soc)?;
+    can_and_led_matrix(&soc)?;
 
     println!();
     println!(
@@ -406,4 +408,177 @@ fn watchdog(soc: &Rc<RefCell<Soc>>) -> Result<(), String> {
         read32(soc, map::rcc::BASE + map::rcc::CSR)
     );
     Ok(())
+}
+
+/// Forwards peripheral events to the two off-chip parts of the demo.
+struct DeviceSink {
+    matrix: Rc<RefCell<Max7219>>,
+    transceiver: Rc<RefCell<CanTransceiver>>,
+    clock_ns: Rc<Cell<u64>>,
+}
+
+impl EventSink for DeviceSink {
+    fn on_event(&mut self, event: &Event) {
+        let now = self.clock_ns.get();
+        self.matrix.borrow_mut().on_event(event);
+        self.transceiver.borrow_mut().on_event(event, now);
+    }
+}
+
+/// Drives CAN1 in loopback mode plus the two device models of `gsim-devices`.
+fn can_and_led_matrix(soc: &Rc<RefCell<Soc>>) -> Result<(), String> {
+    let matrix = Rc::new(RefCell::new(Max7219::firmware_default()));
+    let bus = Rc::new(RefCell::new(CanBus::new()));
+    let transceiver = Rc::new(RefCell::new(CanTransceiver::attach(
+        Rc::clone(&bus),
+        "demo 节点",
+        0,
+    )));
+    let clock = Rc::new(Cell::new(soc.borrow().now_ns()));
+    soc.borrow_mut().add_event_sink(Box::new(DeviceSink {
+        matrix: Rc::clone(&matrix),
+        transceiver: Rc::clone(&transceiver),
+        clock_ns: Rc::clone(&clock),
+    }));
+
+    println!();
+    println!("== CAN1 (bxCAN) 回环 + 收发器 + 虚拟总线 ==");
+    let can = map::can::BASE_1;
+    let apb1enr = read32(soc, map::rcc::BASE + map::rcc::APB1ENR);
+    write32(soc, map::rcc::BASE + map::rcc::APB1ENR, apb1enr | (1 << 25));
+
+    // 200 kbit/s: PCLK1 36 MHz / 36 = 1 us per tq, 5 tq per bit.
+    write32(soc, can + map::can::MCR, 1);
+    write32(soc, can + map::can::BTR, (2 - 1) << 16 | (2 - 1) << 20 | 35 | (1 << 30));
+    // One 32 bit mask filter for the standard identifier 0x123, into FIFO0.
+    write32(soc, can + map::can::FMR, 1);
+    write32(soc, can + map::can::FS1R, 1);
+    write32(soc, can + map::can::FILTER_BASE, 0x123 << 21);
+    write32(soc, can + map::can::FILTER_BASE + 4, 0x7FF << 21);
+    write32(soc, can + map::can::FA1R, 1);
+    write32(soc, can + map::can::FMR, 0);
+    write32(soc, can + map::can::MCR, 0);
+    write32(soc, can + map::can::IER, 1 << 1);
+
+    let payload = b"Hello";
+    let mut low = 0u32;
+    let mut high = 0u32;
+    for index in 0..4 {
+        low |= u32::from(*payload.get(index).unwrap_or(&0)) << (index * 8);
+        high |= u32::from(*payload.get(index + 4).unwrap_or(&0)) << (index * 8);
+    }
+    write32(soc, can + map::can::TX_BASE, 0x123 << 21);
+    write32(soc, can + map::can::TX_BASE + map::can::TDTR, payload.len() as u32);
+    write32(soc, can + map::can::TX_BASE + map::can::TDHR, high);
+    write32(soc, can + map::can::TX_BASE + map::can::TDLR, low);
+    write32(soc, can + map::can::TX_BASE, (0x123 << 21) | 1);
+    println!("  邮箱已请求发送 0x123 [48 65 6C 6C 6F]（回环模式）");
+
+    // The watchdog demo reset the device, so the bus runs on the 8 MHz HSI:
+    // one bit is 22.5 us and an 87 bit frame needs about 2 ms.
+    advance(soc, &clock, 2_500_000);
+    let received = soc.borrow().can.rx_frames(0);
+    println!(
+        "  帧时间到 → FIFO0 收到 {} 帧：{}",
+        received.len(),
+        received
+            .iter()
+            .map(|frame| format!("{} [{}]", frame.id_label(), frame.data_label()))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    println!(
+        "  控制器状态：{}，TEC/REC = {:?}，累计发送 {} 帧",
+        soc.borrow().can.mode().label(),
+        soc.borrow().can.error_counters(),
+        soc.borrow().can.stats().tx_frames
+    );
+
+    // A second ECU puts a frame on the wire; the transceiver hands it to CAN1.
+    let now = soc.borrow().now_ns();
+    let injected = CanFrame::standard(0x123, b"bus");
+    bus.borrow_mut().inject(injected, now);
+    loop {
+        let frame = transceiver.borrow_mut().poll();
+        let Some(frame) = frame else { break };
+        soc.borrow_mut().can_receive(0, frame);
+    }
+    println!(
+        "  另一节点注入 0x123 [62 75 73] → FIFO0 {} 帧，总线记录 {} 条",
+        soc.borrow().can.rx_level(0),
+        bus.borrow().records().len()
+    );
+
+    println!();
+    println!("== MAX7219 8x8 点阵（SPI1: PA5/PA7，PA4 = LOAD）==");
+    let gpioa = map::gpio::PORTS[0];
+    let apb2enr = read32(soc, map::rcc::BASE + map::rcc::APB2ENR);
+    write32(soc, map::rcc::BASE + map::rcc::APB2ENR, apb2enr | (1 << 2) | (1 << 12));
+    let crl = read32(soc, gpioa + map::gpio::CRL);
+    let crl = (crl & !0x000F_0000) | (0b0010 << 16);
+    let crl = (crl & !((0xF << 20) | (0xF << 28))) | (0b1011 << 20) | (0b1011 << 28);
+    write32(soc, gpioa + map::gpio::CRL, crl);
+    write32(soc, gpioa + map::gpio::BSRR, 1 << 4);
+    write32(soc, map::spi::BASE_1 + map::spi::CR1, (1 << 2) | (0b010 << 3) | (1 << 6));
+
+    let icon: [u8; 8] = [0x3C, 0x42, 0xA5, 0x81, 0xA5, 0x99, 0x42, 0x3C];
+    for (register, value) in [
+        (0x0Fu8, 0x00u8),
+        (0x09, 0x00),
+        (0x0B, 0x07),
+        (0x0A, 0x0F),
+        (0x0C, 0x01),
+    ] {
+        max7219_write(soc, &matrix, &clock, register, value);
+    }
+    for (row, byte) in icon.iter().enumerate() {
+        max7219_write(soc, &matrix, &clock, 0x01 + row as u8, *byte);
+    }
+
+    let device = matrix.borrow();
+    let pixels = device.chips()[0].pixels();
+    for row in pixels {
+        let line: String = row
+            .iter()
+            .map(|pixel| if *pixel { '#' } else { '.' })
+            .collect();
+        println!("  {line}");
+    }
+    println!(
+        "  亮度 {}/15，已锁存 {} 帧，DOUT 回显 0x{:04X}",
+        device.chips()[0].intensity(),
+        device.words(),
+        device.miso()
+    );
+    Ok(())
+}
+
+/// Shifts one 16 bit command into the matrix (two SPI bytes, LOAD around them).
+fn max7219_write(
+    soc: &Rc<RefCell<Soc>>,
+    matrix: &Rc<RefCell<Max7219>>,
+    clock: &Rc<Cell<u64>>,
+    register: u8,
+    value: u8,
+) {
+    write32(soc, map::gpio::PORTS[0] + map::gpio::BSRR, 1 << (4 + 16));
+    for byte in [register, value] {
+        let miso = matrix.borrow().miso();
+        soc.borrow_mut().spi_set_miso(0, miso);
+        write32(soc, map::spi::BASE_1 + map::spi::DR, u32::from(byte));
+        advance(soc, clock, 12_000);
+    }
+    write32(soc, map::gpio::PORTS[0] + map::gpio::BSRR, 1 << 4);
+}
+
+/// Steps the simulation, keeping the device sink's clock up to date.
+fn advance(soc: &Rc<RefCell<Soc>>, clock: &Rc<Cell<u64>>, nanoseconds: u64) {
+    let mut remaining = nanoseconds;
+    while remaining > 0 {
+        let chunk = remaining.min(1_000);
+        clock.set(soc.borrow().now_ns());
+        soc.borrow_mut().advance_ns(chunk);
+        remaining -= chunk;
+    }
+    clock.set(soc.borrow().now_ns());
 }

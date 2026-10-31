@@ -89,9 +89,7 @@ impl GdbServer {
     pub fn serve(mut self, listener: TcpListener) -> io::Result<()> {
         let address = listener.local_addr()?;
         eprintln!("virtual ST-Link listening on {address}");
-        eprintln!(
-            "  arm-none-eabi-gdb <firmware.elf> -ex 'target extended-remote {address}'"
-        );
+        eprintln!("  arm-none-eabi-gdb <firmware.elf> -ex 'target extended-remote {address}'");
 
         let mut target: Option<Target> = None;
         for stream in listener.incoming() {
@@ -115,9 +113,9 @@ impl GdbServer {
         let mut target =
             Target::new(self.options.hse_hz, self.options.echo_uart).map_err(io::Error::other)?;
         if let Some(path) = &self.options.elf {
-            target.load_elf(path).map_err(|message| {
-                io::Error::other(format!("{}: {message}", path.display()))
-            })?;
+            target
+                .load_elf(path)
+                .map_err(|message| io::Error::other(format!("{}: {message}", path.display())))?;
             eprintln!("loaded {}", path.display());
         }
         Ok(target)
@@ -125,10 +123,7 @@ impl GdbServer {
 
     fn session(&mut self, connection: &mut Connection, target: &mut Target) -> io::Result<()> {
         target.attach();
-        self.note(&format!(
-            "attached: core halted at 0x{:08X}",
-            target.pc()
-        ));
+        self.note(&format!("attached: core halted at 0x{:08X}", target.pc()));
         loop {
             match connection.wait()? {
                 Waiting::Closed => return Ok(()),
@@ -270,7 +265,9 @@ impl GdbServer {
         let mut reply = format!("T{signal:02x}thread:1;");
         match stop {
             Some(Stop::Breakpoint { hardware: true, .. }) => reply.push_str("hwbreak:;"),
-            Some(Stop::Breakpoint { hardware: false, .. }) => reply.push_str("swbreak:;"),
+            Some(Stop::Breakpoint {
+                hardware: false, ..
+            }) => reply.push_str("swbreak:;"),
             Some(Stop::Watchpoint { address }) => {
                 reply.push_str(&format!("awatch:{address:x};"));
             }
@@ -645,7 +642,8 @@ fn preview(payload: &[u8]) -> String {
 }
 
 /// Parses the `<type>,<address>,<size>` part of a `Z`/`z` packet.
-fn parse_point(payload: &str) -> Option<(PointKind, u32, u32)> {    let mut fields = payload.split(',');
+fn parse_point(payload: &str) -> Option<(PointKind, u32, u32)> {
+    let mut fields = payload.split(',');
     let kind = match fields.next()? {
         "0" => PointKind::Software,
         "1" => PointKind::Hardware,
@@ -716,7 +714,11 @@ mod tests {
         let registers = request(&mut stream, &mut buffer, "g");
         assert_eq!(registers.len(), description::REGISTER_COUNT * 8);
 
-        let reply = request(&mut stream, &mut buffer, "qXfer:features:read:target.xml:0,3ff");
+        let reply = request(
+            &mut stream,
+            &mut buffer,
+            "qXfer:features:read:target.xml:0,3ff",
+        );
         assert!(reply.starts_with('l') || reply.starts_with('m'), "{reply}");
         assert!(reply.contains("<target"), "{reply}");
     }

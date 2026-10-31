@@ -65,7 +65,6 @@ fn real_gdb_flashes_breaks_and_runs_the_simulator() {
     let (listener, server) = GdbServer::bind(ServerOptions {
         bind: SocketAddr::from(([127, 0, 0, 1], 0)),
         echo_uart: false,
-        verbose: true,
         ..ServerOptions::default()
     })
     .expect("the loopback socket binds");
@@ -89,6 +88,8 @@ fn real_gdb_flashes_breaks_and_runs_the_simulator() {
         .args(["-ex", "info registers pc"])
         .args(["-ex", "monitor info"])
         .args(["-ex", "detach"])
+        // Without this GDB reads the harness' stdin as a command file.
+        .stdin(std::process::Stdio::null())
         .output()
         .expect("gdb starts");
 
@@ -97,7 +98,10 @@ fn real_gdb_flashes_breaks_and_runs_the_simulator() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(text.contains("load size"), "gdb did not report a download:\n{text}");
+    assert!(
+        text.contains("load size"),
+        "gdb did not report a download:\n{text}"
+    );
     assert!(
         text.contains("Breakpoint 1, main"),
         "gdb did not stop in main:\n{text}"
@@ -107,7 +111,7 @@ fn real_gdb_flashes_breaks_and_runs_the_simulator() {
         "monitor info produced no output:\n{text}"
     );
     assert!(
-        text.contains("in main"),
+        text.contains("<main"),
         "the pc should be inside main after the breakpoint:\n{text}"
     );
 }
