@@ -217,6 +217,16 @@ fn categories() -> Vec<&'static str> {
     categories
 }
 
+/// Index of a side in the `[left, right, top, bottom]` arrays.
+fn side_index(side: Side) -> usize {
+    match side {
+        Side::Left => 0,
+        Side::Right => 1,
+        Side::Top => 2,
+        Side::Bottom => 3,
+    }
+}
+
 /// Symbol preview drawn at the top of a card, in the spirit of the canvas.
 fn thumbnail(ui: &mut egui::Ui, kind: DeviceKind) {
     let width = ui.available_width().max(80.0);
@@ -231,31 +241,41 @@ fn thumbnail(ui: &mut egui::Ui, kind: DeviceKind) {
     painter.rect_filled(body, 4.0, COLOR_BODY);
     painter.rect_stroke(body, 4.0, Stroke::new(1.0, COLOR_EDGE), StrokeKind::Inside);
 
+    // Pins sit on the edge their role assigns them: signals on the left, bus
+    // and outputs on the right, `VCC`/`GND` along the top.
     let pins = kind.pins();
-    let totals = [
-        pins.iter()
-            .filter(|def| matches!(def.side, Side::Left | Side::Top))
-            .count(),
-        pins.iter()
-            .filter(|def| matches!(def.side, Side::Right | Side::Bottom))
-            .count(),
-    ];
-    let mut seen = [0usize; 2];
-    for def in pins.iter() {
-        let column = match def.side {
-            Side::Left | Side::Top => 0,
-            Side::Right | Side::Bottom => 1,
-        };
-        seen[column] += 1;
-        let fraction = seen[column] as f32 / (totals[column] + 1) as f32;
-        let y = body.top() + body.height() * fraction;
-        let tip = match def.side {
-            Side::Left | Side::Top => Pos2::new(body.left() - 13.0, y),
-            Side::Right | Side::Bottom => Pos2::new(body.right() + 13.0, y),
-        };
-        let base = match def.side {
-            Side::Left | Side::Top => Pos2::new(body.left(), y),
-            Side::Right | Side::Bottom => Pos2::new(body.right(), y),
+    let mut totals = [0usize; 4];
+    for def in pins {
+        totals[side_index(def.side)] += 1;
+    }
+    let mut seen = [0usize; 4];
+    for def in pins {
+        let side = side_index(def.side);
+        seen[side] += 1;
+        let fraction = seen[side] as f32 / (totals[side] + 1) as f32;
+        let (base, tip) = match def.side {
+            Side::Left => {
+                let y = body.top() + body.height() * fraction;
+                (Pos2::new(body.left(), y), Pos2::new(body.left() - 12.0, y))
+            }
+            Side::Right => {
+                let y = body.top() + body.height() * fraction;
+                (
+                    Pos2::new(body.right(), y),
+                    Pos2::new(body.right() + 12.0, y),
+                )
+            }
+            Side::Top => {
+                let x = body.left() + body.width() * fraction;
+                (Pos2::new(x, body.top()), Pos2::new(x, body.top() - 7.0))
+            }
+            Side::Bottom => {
+                let x = body.left() + body.width() * fraction;
+                (
+                    Pos2::new(x, body.bottom()),
+                    Pos2::new(x, body.bottom() + 7.0),
+                )
+            }
         };
         painter.line_segment([base, tip], Stroke::new(1.4, COLOR_PIN));
         painter.circle_filled(tip, 2.0, COLOR_PIN);
@@ -272,6 +292,7 @@ fn thumbnail(ui: &mut egui::Ui, kind: DeviceKind) {
         DeviceKind::HseCrystal | DeviceKind::LseCrystal => Color32::from_rgb(190, 150, 255),
         DeviceKind::Resistor => Color32::from_rgb(210, 170, 120),
         DeviceKind::Scope => Color32::from_rgb(120, 230, 220),
+        DeviceKind::Junction => Color32::from_rgb(120, 196, 240),
     };
     match kind {
         DeviceKind::Led => {
@@ -501,6 +522,18 @@ fn thumbnail(ui: &mut egui::Ui, kind: DeviceKind) {
                 ));
             }
             painter.add(Shape::line(points, stroke));
+        }
+        DeviceKind::Junction => {
+            // A tap point: the dot that sits on a wire, with a short lead.
+            let center = body.center();
+            painter.line_segment(
+                [
+                    Pos2::new(center.x - body.width() * 0.4, center.y),
+                    Pos2::new(center.x + body.width() * 0.4, center.y),
+                ],
+                Stroke::new(1.6, accent),
+            );
+            painter.circle_filled(center, 4.0, accent);
         }
     }
 }

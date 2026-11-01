@@ -250,8 +250,8 @@ impl CanBusWindow {
                 if network.nodes == 0 {
                     ui.label(
                         RichText::new(
-                            "画布上没有接在 CANH/CANL 上的收发器：注入的帧上不了线，\
-                             把收发器的 CANH/CANL 接到终端电阻与探头上即可",
+                            "画布上没有可用的收发器：注入的帧上不了线。\
+                             把收发器的 CANH/CANL 接到终端电阻与探头上，并给它的 VCC/GND 接上电源",
                         )
                         .small()
                         .color(Color32::from_rgb(230, 190, 90)),

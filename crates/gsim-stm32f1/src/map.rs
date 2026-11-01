@@ -226,11 +226,13 @@ pub mod pwr {
 
 pub mod bkp {
     pub const BASE: u32 = super::APB1_BASE + 0x6C00;
-    pub const RTCCR: u32 = 0x00;
-    pub const CR: u32 = 0x04;
-    pub const CSR: u32 = 0x08;
-    pub const DR1: u32 = 0x0C;
-    pub const DR_LAST: u32 = 0x30;
+    /// `BKP_DR1`..`BKP_DR10` start right after the reserved word at `+0x00`.
+    pub const DR1: u32 = 0x04;
+    /// Last backup data register (`BKP_DR10`).
+    pub const DR_LAST: u32 = 0x28;
+    pub const RTCCR: u32 = 0x2C;
+    pub const CR: u32 = 0x30;
+    pub const CSR: u32 = 0x34;
 }
 
 pub mod rtc {

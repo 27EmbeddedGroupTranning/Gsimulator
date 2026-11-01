@@ -6,12 +6,15 @@ use std::path::PathBuf;
 use eframe::egui;
 use egui::{Color32, RichText};
 
-use crate::board::{Board, BoardState, DeviceKind, PinLevels, PinRef, POWER_PIN};
+use crate::board::{
+    Board, BoardState, DeviceKind, PinLevels, PinRef, Supply, JUNCTION_PIN, POWER_PIN,
+};
 use crate::bridge;
 use crate::canbus::{CanAction, CanBusWindow};
 use crate::canvas::Schematic;
 use crate::library::DeviceLibrary;
 use crate::peripherals::PeripheralBrowser;
+use crate::project;
 use crate::scope::{ScopeAction, ScopeWindow};
 use crate::sim::{Simulation, Snapshot, Source};
 use crate::stimulus::{StimulusAction, StimulusWindow};
@@ -33,6 +36,8 @@ pub struct App {
     board_state: BoardState,
     budget: u32,
     elf_path: Option<PathBuf>,
+    /// Project file the schematic was last saved to or opened from.
+    project_path: Option<PathBuf>,
     last_frame: Option<std::time::Instant>,
     /// Simulated seconds per real second, smoothed.
     speed: f64,
@@ -65,9 +70,9 @@ impl App {
         install_fonts(ctx);
         ctx.set_visuals(egui::Visuals::dark());
 
-        // The canvas starts empty: parts (including the crystals) are placed
-        // from the library, the "示例电路" button restores a demo wiring.
-        let board = Board::new();
+        // A new project starts with the HSE crystal already placed and wired;
+        // the other parts come from the library (示例电路 loads a demo).
+        let board = Board::new_project();
         let mut sim = Simulation::new();
         sim.set_crystals(board.crystals());
         if let Some(path) = elf_path {
@@ -78,7 +83,7 @@ impl App {
         let levels = sim.pin_levels();
         let board_state = board.evaluate(&levels);
         let mut snapshot = sim.snapshot();
-        board.fill_snapshot(&mut snapshot);
+        board.fill_snapshot(&mut snapshot, &levels);
         let stimulus = StimulusWindow::from_config(sim.stimulus());
 
         App {
@@ -90,6 +95,7 @@ impl App {
             board_state,
             budget: DEFAULT_BUDGET,
             elf_path: None,
+            project_path: None,
             last_frame: None,
             speed: 0.0,
             fitted: false,
@@ -123,6 +129,73 @@ impl App {
             }
             Err(error) => self.schematic.say(error, true),
         }
+    }
+
+    /// Writes the schematic to a `.gsim` file chosen by the user.
+    fn save_project(&mut self) {
+        let mut dialog = rfd::FileDialog::new()
+            .add_filter("Gsimulator 工程", &[project::EXTENSION])
+            .set_file_name(format!("schematic.{}", project::EXTENSION));
+        if let Some(directory) = self
+            .project_path
+            .as_ref()
+            .and_then(|path| path.parent().map(|parent| parent.to_path_buf()))
+        {
+            dialog = dialog.set_directory(directory);
+        }
+        let Some(path) = dialog.save_file() else {
+            return;
+        };
+        match self.save_project_to(&path) {
+            Ok(()) => self
+                .schematic
+                .say(format!("已保存 {}", path.display()), false),
+            Err(error) => self.schematic.say(error, true),
+        }
+    }
+
+    /// Replaces the schematic with a `.gsim` file chosen by the user.
+    fn open_project(&mut self) {
+        let mut dialog = rfd::FileDialog::new()
+            .add_filter("Gsimulator 工程", &[project::EXTENSION])
+            .add_filter("所有文件", &["*"]);
+        if let Some(directory) = self
+            .project_path
+            .as_ref()
+            .and_then(|path| path.parent().map(|parent| parent.to_path_buf()))
+        {
+            dialog = dialog.set_directory(directory);
+        }
+        let Some(path) = dialog.pick_file() else {
+            return;
+        };
+        match self.open_project_from(&path) {
+            Ok(()) => self
+                .schematic
+                .say(format!("已打开 {}", path.display()), false),
+            Err(error) => self.schematic.say(error, true),
+        }
+    }
+
+    /// Saves the schematic to `path` and remembers it as the current project.
+    pub fn save_project_to(&mut self, path: &std::path::Path) -> Result<(), String> {
+        project::save(path, &self.board).map_err(|error| format!("保存失败：{error}"))?;
+        self.project_path = Some(path.to_path_buf());
+        Ok(())
+    }
+
+    /// Loads `path` over the current schematic; the board stays untouched when
+    /// the file cannot be parsed.
+    pub fn open_project_from(&mut self, path: &std::path::Path) -> Result<(), String> {
+        let board = project::open(path)?;
+        self.board = board;
+        self.schematic.reset_interaction();
+        self.uart_input.clear();
+        // Crystals of the loaded board take effect immediately.
+        self.sim.set_crystals(self.board.crystals());
+        self.schematic.fit(self.schematic.last_rect, &self.board);
+        self.project_path = Some(path.to_path_buf());
+        Ok(())
     }
 
     fn toolbar(&mut self, ui: &mut egui::Ui) {
@@ -184,13 +257,21 @@ impl App {
             {
                 self.library.toggle();
             }
-            if ui.button("示例电路").clicked() {
-                self.board = Board::demo();
-                self.schematic.fit(self.schematic.last_rect, &self.board);
-                self.schematic.say(
-                    "已恢复示例电路（LED/PA5、UART1/PA9+PA10、编码器/PA0-PA2、HSE/LSE 晶振）",
-                    false,
-                );
+            if ui
+                .button("💾 保存工程…")
+                .on_hover_text(
+                    "把当前原理图（器件、连线、拐点、器件选项）存成 .gsim 文件（Ctrl+S）",
+                )
+                .clicked()
+            {
+                self.save_project();
+            }
+            if ui
+                .button("📂 打开工程…")
+                .on_hover_text("读取 .gsim 工程文件，替换当前原理图（Ctrl+O）")
+                .clicked()
+            {
+                self.open_project();
             }
             if ui.button("清空连线").clicked() {
                 self.board.clear_wires();
@@ -357,7 +438,7 @@ impl App {
                 ui.label(
                     RichText::new(
                         "提示：＋ 添加器件 打开器件库（也可把卡片拖到画布）；点击引脚 → 点击另一个引脚 完成连线；\
-                     拖动线段 / 双击连线 加拐点；Delete 删除选中；中键拖动平移；滚轮缩放。",
+                     拖动线段 拉出拐点；双击连线 加接线节点（双击节点删除）；Delete 删除选中；中键拖动平移；滚轮缩放。",
                     )
                     .color(Color32::GRAY)
                     .small(),
@@ -585,6 +666,31 @@ impl App {
                             .color(Color32::GRAY),
                         );
                     }
+                    DeviceKind::Junction => {
+                        let pin = PinRef::Device {
+                            device: id,
+                            pin: JUNCTION_PIN,
+                        };
+                        let wires = self
+                            .board
+                            .wires()
+                            .iter()
+                            .filter(|wire| wire.a == pin || wire.b == pin)
+                            .count();
+                        ui.label(RichText::new(format!("● {name}")).color(accent));
+                        ui.label(
+                            RichText::new(format!("接线节点 · {wires} 根连线"))
+                                .color(Color32::GRAY),
+                        );
+                    }
+                }
+                if let Some(supply) = self.board_state.supply(id) {
+                    let color = match supply {
+                        Supply::Powered => Color32::from_rgb(120, 200, 130),
+                        Supply::Unwired => Color32::from_rgb(240, 190, 90),
+                        Supply::Fault => Color32::from_rgb(240, 120, 110),
+                    };
+                    ui.label(RichText::new(supply.label()).small().color(color));
                 }
                 if ui.small_button("🗑").clicked() {
                     remove = Some(id);
@@ -616,7 +722,8 @@ impl App {
                 | DeviceKind::Resistor
                 | DeviceKind::Scope
                 | DeviceKind::HseCrystal
-                | DeviceKind::LseCrystal => {}
+                | DeviceKind::LseCrystal
+                | DeviceKind::Junction => {}
             }
         }
         if let Some(id) = remove {
@@ -797,7 +904,8 @@ impl App {
     /// Takes a fresh frame and completes it with the parts placed on the board.
     fn refresh_snapshot(&mut self) {
         self.snapshot = self.sim.snapshot();
-        self.board.fill_snapshot(&mut self.snapshot);
+        let levels = self.snapshot.levels.clone();
+        self.board.fill_snapshot(&mut self.snapshot, &levels);
     }
 
     /// Applies a command issued from the CAN bus window.
@@ -889,10 +997,12 @@ impl App {
     }
 
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
-        let (space, reset) = ctx.input(|i| {
+        let (space, reset, save, open) = ctx.input(|i| {
             (
                 i.key_pressed(egui::Key::Space),
                 i.key_pressed(egui::Key::R) && !i.modifiers.ctrl,
+                i.key_pressed(egui::Key::S) && i.modifiers.command,
+                i.key_pressed(egui::Key::O) && i.modifiers.command,
             )
         });
         if space {
@@ -900,6 +1010,12 @@ impl App {
         }
         if reset {
             self.sim.reset();
+        }
+        if save {
+            self.save_project();
+        }
+        if open {
+            self.open_project();
         }
     }
 
@@ -911,6 +1027,11 @@ impl App {
     /// Pin levels drawn in the last frame, exposed for the headless UI tests.
     pub fn levels(&self) -> &PinLevels {
         &self.levels
+    }
+
+    /// The schematic currently on the canvas.
+    pub fn board(&self) -> &Board {
+        &self.board
     }
 
     /// Device library window, exposed for the headless UI test.

@@ -46,6 +46,7 @@ target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user sources here
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/max7219.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/selftest.c
 )
 
 # Add include paths

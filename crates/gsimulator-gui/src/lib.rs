@@ -10,6 +10,7 @@ pub mod canbus;
 pub mod canvas;
 pub mod library;
 pub mod peripherals;
+pub mod project;
 pub mod route;
 pub mod scope;
 pub mod sim;

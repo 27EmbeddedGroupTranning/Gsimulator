@@ -269,12 +269,29 @@ fn missing_elf_is_reported_instead_of_panicking() {
 }
 
 #[test]
-fn the_app_starts_with_an_empty_board_and_a_live_clock() {
+fn the_app_starts_with_the_hse_crystal_and_a_live_clock() {
     let ctx = egui::Context::default();
     let mut app = App::with_context(&ctx, None);
     for _ in 0..2 {
         let _ = ctx.run(raw_input(), |ctx| app.draw(ctx));
     }
+
+    let board = app.board();
+    assert!(
+        board.first_of(DeviceKind::HseCrystal).is_some(),
+        "a new project must already carry the HSE crystal"
+    );
+    assert_eq!(
+        board.crystals().hse_hz,
+        Some(8_000_000),
+        "the crystal must be wired across OSC_IN/OSC_OUT"
+    );
+    assert_eq!(
+        board.devices().len(),
+        1,
+        "no other part is placed by default"
+    );
+
     let levels = app.levels();
     assert!(
         !levels.is_output(0, 5),
@@ -282,7 +299,7 @@ fn the_app_starts_with_an_empty_board_and_a_live_clock() {
     );
     assert!(
         !levels.level_of(0, 0) && !levels.level_of(0, 1),
-        "the empty board has no encoder pulling contacts high"
+        "there is no encoder pulling contacts high"
     );
     assert!(
         app.sim_time_ns() > 0,

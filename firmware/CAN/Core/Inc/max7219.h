@@ -1,13 +1,14 @@
 /**
   ******************************************************************************
   * @file    max7219.h
-  * @brief   MAX7219 8x8 LED 点阵驱动（SPI1 软件片选）
+  * @brief   MAX7219 8x8 LED matrix driver on SPI1 (software chip select).
   ******************************************************************************
-  * 接线（与 CubeMX 当前配置一致）：
+  * Wiring, matching the default STM32F103 pin mapping:
   *   SCK       -> PA5  (SPI1_SCK)
   *   MOSI/DIN  -> PA7  (SPI1_MOSI)
-  *   LOAD/CS   -> PA4  (SPI1_NSS，CubeMX 中 NSS 为软件管理，代码里配成推挽输出)
-  *   VCC       -> 5V（模块自带稳压时可用 3.3V，视模块而定）
+  *   MISO/DOUT -> PA6  (SPI1_MISO, used for the echo self test)
+  *   LOAD/CS   -> PA4  (software managed chip select)
+  *   VCC       -> 5 V (or 3.3 V on modules with an on-board regulator)
   *   GND       -> GND
   ******************************************************************************
   */
@@ -20,33 +21,32 @@ extern "C" {
 
 #include "main.h"
 
-/* ---- 片选引脚 ---- */
+/* ---- chip select ---- */
 #define MAX7219_CS_PORT        GPIOA
-#define MAX7219_CS_PIN         GPIO_PIN_4
+#define MAX7219_CS_PIN         4u
 
-/* 级联片数：单个 8x8 点阵填 1，4 合 1 模块填 4 */
-#define MAX7219_CHAIN          1U
+/* Number of chained dies: one 8x8 module = 1, a 4-in-1 module = 4. */
+#define MAX7219_CHAIN          1u
 
-/* 亮度 0~15 */
-#define MAX7219_INTENSITY      0x07U
+/* Brightness 0..15 */
+#define MAX7219_INTENSITY      0x07u
 
-/* ---- 行列方向修正 ----
-   不同模块的 DIGIT0~DIGIT7 / bit7 物理位置并不统一，按实际显示结果调整：
-     MAX7219_FLIP_VERTICAL   = 1 -> DIGIT0 是最下行（图案上下颠倒时置 1）
-     MAX7219_FLIP_HORIZONTAL = 1 -> bit7 是最右列（图案左右镜像时置 1） */
+/* ---- row / column orientation ----
+     MAX7219_FLIP_VERTICAL   = 1 -> DIGIT0 is the bottom row (upside-down image)
+     MAX7219_FLIP_HORIZONTAL = 1 -> bit7 is the rightmost column (mirrored image) */
 #define MAX7219_FLIP_VERTICAL     0
 #define MAX7219_FLIP_HORIZONTAL   0
 
-/* ---- 寄存器地址 ---- */
-#define MAX7219_REG_NOOP       0x00U
-#define MAX7219_REG_DIGIT0     0x01U   /* 第 1 行，DIGIT0~DIGIT7 对应 8 行 */
-#define MAX7219_REG_DECODE     0x09U
-#define MAX7219_REG_INTENSITY  0x0AU
-#define MAX7219_REG_SCANLIMIT  0x0BU
-#define MAX7219_REG_SHUTDOWN   0x0CU
-#define MAX7219_REG_DISPLAYTEST 0x0FU
+/* ---- register addresses ---- */
+#define MAX7219_REG_NOOP        0x00u
+#define MAX7219_REG_DIGIT0      0x01u  /* DIGIT0..DIGIT7 are rows 1..8 */
+#define MAX7219_REG_DECODE      0x09u
+#define MAX7219_REG_INTENSITY   0x0Au
+#define MAX7219_REG_SCANLIMIT   0x0Bu
+#define MAX7219_REG_SHUTDOWN    0x0Cu
+#define MAX7219_REG_DISPLAYTEST 0x0Fu
 
-void MAX7219_Init(SPI_HandleTypeDef *hspi);
+void MAX7219_Init(void);
 void MAX7219_Reinit(void);
 void MAX7219_SetIntensity(uint8_t level);
 void MAX7219_DisplayTest(uint8_t enable);
@@ -54,12 +54,12 @@ void MAX7219_Clear(void);
 void MAX7219_ShowImage(const uint8_t image[8]);
 void MAX7219_ShowCheck(void);
 
-/* SPI 传输失败次数，调试器里观察；正常应保持 0 */
-extern volatile uint32_t MAX7219_ErrCount;
-/* DOUT 回读值（接 DOUT→PA6 后有效），正常应为最近发出的一帧 */
-extern volatile uint16_t MAX7219_Echo;
+/* Answers on DOUT: 1 when the chain shifted a known word back, 0 when
+   nothing is wired to MISO. */
+int MAX7219_Detect(uint16_t *echo);
 
-void MAX7219_EchoTest(void);
+/* Number of failed SPI transfers (should stay 0). */
+extern volatile uint32_t MAX7219_ErrCount;
 
 #ifdef __cplusplus
 }

@@ -3,7 +3,7 @@
 
 use eframe::egui;
 use gsim_devices::CanBus;
-use gsimulator_gui::board::Board;
+use gsimulator_gui::board::{Board, PinLevels};
 use gsimulator_gui::canbus::CanBusWindow;
 use gsimulator_gui::peripherals::PeripheralBrowser;
 use gsimulator_gui::scope::ScopeWindow;
@@ -40,7 +40,7 @@ fn the_peripheral_browser_lists_every_block_and_the_placed_devices() {
     let mut board = Board::new();
     board.add_matrix(egui::Pos2::new(600.0, 100.0));
     board.add_can(egui::Pos2::new(600.0, 300.0));
-    board.fill_snapshot(&mut snapshot);
+    board.fill_snapshot(&mut snapshot, &PinLevels::default());
     assert!(
         snapshot
             .peripherals
@@ -138,7 +138,7 @@ fn the_scope_window_draws_the_trace_of_a_wired_probe() {
             });
         }
     }
-    board.fill_snapshot(&mut snapshot);
+    board.fill_snapshot(&mut snapshot, &PinLevels::default());
     assert_eq!(snapshot.scopes.len(), 1);
     assert_eq!(snapshot.scopes[0].samples.len(), 64);
     assert!(snapshot.scopes[0].peak > 1.9);

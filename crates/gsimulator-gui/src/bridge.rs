@@ -17,7 +17,7 @@
 //! it out of `App` makes the timing loop easy to reason about.
 
 use crate::board::{
-    Board, DeviceId, DeviceKind, Hardware, PinRef, CAN_RXD, CAN_TXD, ENCODER_A, ENCODER_B,
+    Board, DeviceId, DeviceKind, Hardware, PinRef, Supply, CAN_RXD, CAN_TXD, ENCODER_A, ENCODER_B,
     ENCODER_SW, MATRIX_CLK, MATRIX_CS, MATRIX_DIN, MATRIX_DOUT, UART_RX, UART_TX,
 };
 use crate::sim::Simulation;
@@ -96,10 +96,15 @@ struct Wiring {
 }
 
 impl Wiring {
-    fn collect(board: &Board) -> Vec<Wiring> {
+    /// Resolves every part that is wired to the controller *and* powered.
+    ///
+    /// A part without a supply (or with a crossed one) is skipped entirely: it
+    /// neither sees controller events nor drives the pins it is wired to.
+    fn collect(board: &Board, powered: impl Fn(DeviceId) -> bool) -> Vec<Wiring> {
         board
             .devices()
             .iter()
+            .filter(|device| powered(device.id))
             .filter_map(|device| {
                 let pin = |index: u8| {
                     board.mcu_pin_for(PinRef::Device {
@@ -113,7 +118,7 @@ impl Wiring {
                         let (tx_port, tx_pin) = USART_TX_PINS[usize::from(unit)];
                         let (rx_port, rx_pin) = USART_RX_PINS[usize::from(unit)];
                         Attach::Uart {
-                            listening: board.is_connected(
+                            listening: board.same_net(
                                 PinRef::Mcu {
                                     port: tx_port,
                                     pin: tx_pin,
@@ -123,7 +128,7 @@ impl Wiring {
                                     pin: UART_RX,
                                 },
                             ),
-                            answering: board.is_connected(
+                            answering: board.same_net(
                                 PinRef::Device {
                                     device: device.id,
                                     pin: UART_TX,
@@ -178,8 +183,13 @@ impl Wiring {
 pub fn service(board: &mut Board, sim: &mut Simulation) -> ServiceReport {
     let events = sim.take_events();
     let now_ns = sim.now_ns();
-    let network = board.can_network();
-    let wiring = Wiring::collect(board);
+    // A part only takes part in the slice when its supply is on the rails;
+    // the bridge is the single place that decides this.
+    let supplies = board.supplies(&sim.pin_levels());
+    let powered =
+        |id: DeviceId| !matches!(supplies.get(&id), Some(Supply::Unwired | Supply::Fault));
+    let network = board.can_network_with(powered);
+    let wiring = Wiring::collect(board, powered);
     let mut report = ServiceReport::default();
 
     // The pair the transceivers sit on: its termination decides how clean the
@@ -336,7 +346,9 @@ pub fn run_frame(
 /// the pair, steps the wire one bit at a time so the controller sees the level
 /// of every single bit.
 fn advance_slice(board: &mut Board, sim: &mut Simulation, instructions: u32) -> u32 {
-    let network = board.can_network();
+    let supplies = board.supplies(&sim.pin_levels());
+    let network = board
+        .can_network_with(|id| !matches!(supplies.get(&id), Some(Supply::Unwired | Supply::Fault)));
     let wired = network.nodes > 0;
     if !wired {
         sim.advance_frame(instructions);

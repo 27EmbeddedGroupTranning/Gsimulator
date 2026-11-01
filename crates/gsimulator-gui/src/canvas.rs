@@ -15,16 +15,16 @@ use crate::board::{
 use crate::library::DeviceDrag;
 use crate::route::{self, Dir};
 
-/// Size of the MCU symbol: a square package, like the LQFP48 it models.
-const MCU_SIZE: Vec2 = Vec2::new(330.0, 330.0);
+/// Size of the MCU symbol: an LQFP48 package drawn square, twelve pins a side.
+const MCU_SIZE: Vec2 = Vec2::new(250.0, 250.0);
 /// Top-left corner of the MCU symbol in board space.
 const MCU_ORIGIN: Pos2 = Pos2::new(70.0, 60.0);
-/// Distance between two pin rows.
+/// Distance between two pins of the package.
 const PIN_PITCH: f32 = 17.0;
 /// How far the MCU pin stubs stick out.
 const MCU_STUB: f32 = 26.0;
-/// First pin row offset below (or right of) the symbol's edge.
-const FIRST_ROW: f32 = 32.0;
+/// Distance from the package edge to the first pin of a side.
+const FIRST_PIN: f32 = (MCU_SIZE.x - 11.0 * PIN_PITCH) * 0.5;
 
 const COLOR_BG: Color32 = Color32::from_rgb(24, 27, 32);
 const COLOR_GRID: Color32 = Color32::from_rgb(38, 43, 51);
@@ -134,6 +134,18 @@ impl Schematic {
 
     pub fn cancel_wire(&mut self) {
         self.wire_from = None;
+    }
+
+    /// Drops every transient interaction (wire in progress, selection, drag,
+    /// held knob, armed part) so a freshly loaded board never inherits the
+    /// ids of the previous one.
+    pub fn reset_interaction(&mut self) {
+        self.wire_from = None;
+        self.selected = None;
+        self.drag = None;
+        self.press = None;
+        self.pending = None;
+        self.request_demo = false;
     }
 
     /// Arms the canvas so the next click drops a `kind` symbol there, the
@@ -317,16 +329,30 @@ impl Schematic {
             }
         }
 
-        // Double clicking a wire drops a corner the user can drag, the way an
-        // EDA tool adds a bend point.
+        // Double clicking a wire splices in a tap point the user can wire from,
+        // the way an EDA tool drops a junction; double clicking that point
+        // again takes it away.
         if response.double_clicked() && self.pending.is_none() {
             if let Some(point) = pointer_board {
-                if self.pin_at(board, point).is_none() && self.device_at(board, point).is_none() {
-                    if let Some((wire, leg)) = self.wire_leg_at(point) {
-                        if board.insert_bend(wire, leg, point) {
-                            self.selected = Some(Selection::Bend { wire, bend: leg });
+                if let Some(id) = self.junction_at(board, point) {
+                    let name = board
+                        .device(id)
+                        .map(|device| device.name.clone())
+                        .unwrap_or_default();
+                    board.remove_device(id);
+                    self.selected = None;
+                    self.wire_from = None;
+                    self.say(format!("已删除接线节点 {name}"), false);
+                } else if self.pin_at(board, point).is_none()
+                    && self.device_at(board, point).is_none()
+                {
+                    if let Some((wire, leg, at)) = self.wire_hit(point) {
+                        // The tap goes exactly where the route runs, so the two
+                        // halves stay on the line the user clicked.
+                        if let Some(id) = board.add_junction(wire, leg, at) {
+                            self.selected = Some(Selection::Device(id));
                             self.wire_from = None;
-                            self.say("已添加拐点：拖动可调整，Delete 删除", false);
+                            self.say("已添加接线节点：点它可继续连线，双击它删除", false);
                         }
                     }
                 }
@@ -392,9 +418,7 @@ impl Schematic {
                 }
             }
             (Some(Drag::Bend { wire, bend }), Some(point)) => {
-                let snapped =
-                    Pos2::new((point.x / 2.0).round() * 2.0, (point.y / 2.0).round() * 2.0);
-                board.move_bend(wire, bend, snapped);
+                board.move_bend(wire, bend, snap(point));
             }
             _ => {}
         }
@@ -615,8 +639,13 @@ impl Schematic {
 
     /// Nearest wire leg under `point`, as `(wire, leg)`.
     fn wire_leg_at(&self, point: Pos2) -> Option<(usize, usize)> {
+        self.wire_hit(point).map(|(wire, leg, _)| (wire, leg))
+    }
+
+    /// Nearest wire leg under `point`, as `(wire, leg, point on the route)`.
+    fn wire_hit(&self, point: Pos2) -> Option<(usize, usize, Pos2)> {
         let tolerance = 7.0;
-        let mut best: Option<(f32, usize, usize)> = None;
+        let mut best: Option<(f32, usize, usize, Pos2)> = None;
         for (index, route) in self.routes.iter().enumerate() {
             for leg in 0..route.legs.len() {
                 let from = route.legs[leg];
@@ -626,16 +655,28 @@ impl Schematic {
                     .copied()
                     .unwrap_or(route.points.len());
                 for pair in route.points[from..to].windows(2) {
-                    let distance = distance_to_segment(point, pair[0], pair[1]);
+                    let (distance, at) = closest_on_segment(point, pair[0], pair[1]);
                     if distance <= tolerance
-                        && best.is_none_or(|(best_distance, _, _)| distance < best_distance)
+                        && best.is_none_or(|(best_distance, _, _, _)| distance < best_distance)
                     {
-                        best = Some((distance, index, leg));
+                        best = Some((distance, index, leg, at));
                     }
                 }
             }
         }
-        best.map(|(_, wire, leg)| (wire, leg))
+        best.map(|(_, wire, leg, at)| (wire, leg, at))
+    }
+
+    /// Junction under `point`, for the "double click removes the tap" gesture.
+    fn junction_at(&self, board: &Board, point: Pos2) -> Option<DeviceId> {
+        board
+            .devices()
+            .iter()
+            .rev()
+            .find(|device| {
+                device.kind == DeviceKind::Junction && device.rect().expand(3.0).contains(point)
+            })
+            .map(|device| device.id)
     }
 
     /// Corner (waypoint) under `point`, as `(wire, bend)`.
@@ -712,17 +753,28 @@ impl Schematic {
             COLOR_DIM,
         );
 
-        for (port, pin, side, pos) in mcu_pin_layout() {
-            let tip = self.to_screen(pos, origin);
-            let base = match side {
+        for pin in mcu_pins() {
+            let tip = self.to_screen(pin.pos, origin);
+            let base = match pin.side {
                 Side::Left => Pos2::new(screen.left(), tip.y),
                 Side::Right => Pos2::new(screen.right(), tip.y),
                 Side::Top => Pos2::new(tip.x, screen.top()),
                 Side::Bottom => Pos2::new(tip.x, screen.bottom()),
             };
-            let level = levels.level_of(port, pin);
-            let is_output = levels.is_output(port, pin);
-            let is_hovered = hover == Some(PinRef::Mcu { port, pin });
+            // The supply/reset/boot pins are drawn but not modelled.
+            let Some((port, index)) = pin.signal else {
+                painter.line_segment(
+                    [base, tip],
+                    Stroke::new(self.stroke(1.3), COLOR_LOW.gamma_multiply(0.75)),
+                );
+                self.paint_pin_name(painter, origin, &screen, pin, COLOR_DIM);
+                self.paint_pin_number(painter, origin, &screen, pin);
+                continue;
+            };
+
+            let level = levels.level_of(port, index);
+            let is_output = levels.is_output(port, index);
+            let is_hovered = hover == Some(PinRef::Mcu { port, pin: index });
             let color = if level { COLOR_HIGH } else { COLOR_LOW };
             painter.line_segment([base, tip], Stroke::new(self.stroke(1.6), color));
             painter.circle_filled(tip, self.stroke(3.0), color);
@@ -737,44 +789,91 @@ impl Schematic {
                     Stroke::new(self.stroke(1.5), Color32::WHITE),
                 );
             }
-            let label = format!(
-                "P{}{}",
-                gsim_stm32f1::PORT_NAMES
-                    .get(port as usize)
-                    .copied()
-                    .unwrap_or("?"),
-                pin
-            );
-            let (text_pos, align) = match side {
-                Side::Left => (
-                    Pos2::new(screen.left() + 10.0 * self.zoom, tip.y),
-                    Align2::LEFT_CENTER,
-                ),
-                Side::Right => (
-                    Pos2::new(screen.right() - 10.0 * self.zoom, tip.y),
-                    Align2::RIGHT_CENTER,
-                ),
-                Side::Top => (
-                    Pos2::new(tip.x, screen.top() + 8.0 * self.zoom),
-                    Align2::CENTER_TOP,
-                ),
-                Side::Bottom => (
-                    Pos2::new(tip.x, screen.bottom() - 8.0 * self.zoom),
-                    Align2::CENTER_BOTTOM,
-                ),
-            };
-            painter.text(
-                text_pos,
-                align,
-                label,
-                self.font(9.5),
+            self.paint_pin_name(
+                painter,
+                origin,
+                &screen,
+                pin,
                 if is_hovered {
                     Color32::WHITE
                 } else {
                     COLOR_TEXT
                 },
             );
+            self.paint_pin_number(painter, origin, &screen, pin);
         }
+    }
+
+    /// Name of a package pin, printed inside the body. The names of the top and
+    /// bottom pins are rotated so twelve of them fit next to each other.
+    fn paint_pin_name(
+        &self,
+        painter: &egui::Painter,
+        origin: Pos2,
+        screen: &Rect,
+        pin: &McuPin,
+        color: Color32,
+    ) {
+        let tip = self.to_screen(pin.pos, origin);
+        let font = self.font(8.5);
+        match pin.side {
+            Side::Left => {
+                painter.text(
+                    Pos2::new(screen.left() + 8.0 * self.zoom, tip.y),
+                    Align2::LEFT_CENTER,
+                    pin.name,
+                    font,
+                    color,
+                );
+            }
+            Side::Right => {
+                painter.text(
+                    Pos2::new(screen.right() - 8.0 * self.zoom, tip.y),
+                    Align2::RIGHT_CENTER,
+                    pin.name,
+                    font,
+                    color,
+                );
+            }
+            Side::Top | Side::Bottom => {
+                let galley = painter.layout_no_wrap(pin.name.to_string(), font, color);
+                let size = galley.size();
+                let y = match pin.side {
+                    Side::Top => screen.top() + 8.0 * self.zoom + size.x,
+                    _ => screen.bottom() - 8.0 * self.zoom,
+                };
+                let pos = Pos2::new(tip.x - size.y * 0.5 + 0.5, y);
+                painter.add(
+                    egui::epaint::TextShape::new(pos, galley, color)
+                        .with_angle(-std::f32::consts::FRAC_PI_2),
+                );
+            }
+        }
+    }
+
+    /// Package pin number, printed outside the body next to the stub.
+    fn paint_pin_number(&self, painter: &egui::Painter, origin: Pos2, screen: &Rect, pin: &McuPin) {
+        let tip = self.to_screen(pin.pos, origin);
+        let font = self.font(7.0);
+        let (pos, align) = match pin.side {
+            Side::Left => (
+                Pos2::new(screen.left() - 4.0 * self.zoom, tip.y - 6.0 * self.zoom),
+                Align2::RIGHT_BOTTOM,
+            ),
+            Side::Right => (
+                Pos2::new(screen.right() + 4.0 * self.zoom, tip.y - 6.0 * self.zoom),
+                Align2::LEFT_BOTTOM,
+            ),
+            Side::Top => (
+                Pos2::new(tip.x + 5.0 * self.zoom, screen.top() - 3.0 * self.zoom),
+                Align2::LEFT_BOTTOM,
+            ),
+            Side::Bottom => (
+                Pos2::new(tip.x + 5.0 * self.zoom, screen.bottom() + 3.0 * self.zoom),
+                Align2::LEFT_TOP,
+            ),
+        };
+        painter.text(pos, align, pin.number.to_string(), font, COLOR_DIM);
     }
 
     fn paint_wires(
@@ -928,8 +1027,8 @@ impl Schematic {
         };
         let transceiver = transceiver.borrow();
         painter.text(
-            Pos2::new(rect.center().x, rect.top() + 7.0 * self.zoom),
-            Align2::CENTER_TOP,
+            Pos2::new(rect.left() + 8.0 * self.zoom, rect.top() + 7.0 * self.zoom),
+            Align2::LEFT_TOP,
             "CAN",
             self.font(9.5),
             base,
@@ -942,8 +1041,11 @@ impl Schematic {
             COLOR_TEXT,
         );
         painter.text(
-            Pos2::new(rect.center().x, rect.bottom() - 7.0 * self.zoom),
-            Align2::CENTER_BOTTOM,
+            Pos2::new(
+                rect.right() - 8.0 * self.zoom,
+                rect.bottom() - 7.0 * self.zoom,
+            ),
+            Align2::RIGHT_BOTTOM,
             format!(
                 "发 {} 收 {}",
                 transceiver.stats().tx_frames,
@@ -1172,6 +1274,25 @@ impl Schematic {
             self.to_screen(device.rect().max, origin),
         );
         let selected = self.selected == Some(Selection::Device(device.id));
+        if device.kind == DeviceKind::Junction {
+            // A tap point is just a dot on the wire, not a body with pins.
+            let center = self.to_screen(device.pin_pos(0), origin);
+            let color = if selected {
+                COLOR_WIRE_SELECTED
+            } else {
+                COLOR_WIRE
+            };
+            painter.circle_filled(center, self.stroke(4.5), COLOR_BG);
+            painter.circle_filled(center, self.stroke(3.6), color);
+            if selected {
+                painter.circle_stroke(
+                    center,
+                    self.stroke(7.0),
+                    Stroke::new(self.stroke(1.4), Color32::WHITE),
+                );
+            }
+            return;
+        }
         let base = match device.kind {
             // Keep the bus parts in the colour they have in the library.
             DeviceKind::Can => Color32::from_rgb(245, 200, 60),
@@ -1219,12 +1340,25 @@ impl Schematic {
                 }
                 DeviceKind::Resistor => self.paint_resistor_symbol(painter, rect, base, device),
                 DeviceKind::Scope => self.paint_scope_symbol(painter, rect, base, device),
-                DeviceKind::Vcc | DeviceKind::Gnd => {}
+                DeviceKind::Vcc | DeviceKind::Gnd | DeviceKind::Junction => {}
             }
         }
 
+        // The part name sits above the stubs, so the top contacts (VCC/GND) do
+        // not run through it.
+        let label_y = device
+            .kind
+            .pins()
+            .iter()
+            .enumerate()
+            .filter(|(_, def)| def.side == Side::Top)
+            .map(|(index, _)| {
+                self.to_screen(device.pin_pos(index as u8), origin).y - 4.0 * self.zoom
+            })
+            .reduce(f32::min)
+            .unwrap_or(rect.top() - 8.0 * self.zoom);
         painter.text(
-            Pos2::new(rect.center().x, rect.top() - 8.0 * self.zoom),
+            Pos2::new(rect.center().x, label_y),
             Align2::CENTER_BOTTOM,
             match device.kind {
                 DeviceKind::Vcc => "VCC",
@@ -1238,15 +1372,17 @@ impl Schematic {
         for (index, def) in device.kind.pins().iter().enumerate() {
             let tip = self.to_screen(device.pin_pos(index as u8), origin);
             let (base_pos, text_pos, align) = match def.side {
+                // Left/right names sit on the pin line, so they never drift
+                // into the row of top contacts (`VCC`/`GND`).
                 Side::Left => (
                     Pos2::new(rect.left(), tip.y),
-                    Pos2::new(rect.left() + 6.0 * self.zoom, tip.y - 7.0 * self.zoom),
-                    Align2::LEFT_BOTTOM,
+                    Pos2::new(rect.left() + 6.0 * self.zoom, tip.y),
+                    Align2::LEFT_CENTER,
                 ),
                 Side::Right => (
                     Pos2::new(rect.right(), tip.y),
-                    Pos2::new(rect.right() - 6.0 * self.zoom, tip.y - 7.0 * self.zoom),
-                    Align2::RIGHT_BOTTOM,
+                    Pos2::new(rect.right() - 6.0 * self.zoom, tip.y),
+                    Align2::RIGHT_CENTER,
                 ),
                 Side::Top => (
                     Pos2::new(tip.x, rect.top()),
@@ -1273,6 +1409,17 @@ impl Schematic {
             self.to_screen(body.max, origin),
         );
         let outline = Color32::from_rgba_unmultiplied(120, 196, 240, 150);
+        if kind == DeviceKind::Junction {
+            painter.circle_filled(rect.center(), self.stroke(3.6), outline);
+            painter.text(
+                rect.center() + Vec2::new(10.0, -10.0) * self.zoom,
+                Align2::LEFT_BOTTOM,
+                kind.label(),
+                self.font(10.0),
+                COLOR_TEXT,
+            );
+            return;
+        }
         painter.rect_filled(rect, 7.0 * self.zoom, COLOR_GHOST_FILL);
         painter.rect_stroke(
             rect,
@@ -1302,12 +1449,12 @@ impl Schematic {
             painter.circle_filled(tip, self.stroke(3.0), outline);
             let (label_pos, align) = match def.side {
                 Side::Left => (
-                    Pos2::new(rect.left() + 6.0 * self.zoom, tip.y - 7.0 * self.zoom),
-                    Align2::LEFT_BOTTOM,
+                    Pos2::new(rect.left() + 6.0 * self.zoom, tip.y),
+                    Align2::LEFT_CENTER,
                 ),
                 Side::Right => (
-                    Pos2::new(rect.right() - 6.0 * self.zoom, tip.y - 7.0 * self.zoom),
-                    Align2::RIGHT_BOTTOM,
+                    Pos2::new(rect.right() - 6.0 * self.zoom, tip.y),
+                    Align2::RIGHT_CENTER,
                 ),
                 Side::Top => (
                     Pos2::new(tip.x, rect.top() + 6.0 * self.zoom),
@@ -1378,8 +1525,13 @@ impl Schematic {
         };
         let left = rect.left() + 8.0 * self.zoom;
         painter.text(
-            Pos2::new(left, rect.top() + 9.0 * self.zoom),
-            Align2::LEFT_TOP,
+            // The left edge belongs to the `RX`/`TX` contacts, the top edge to
+            // `VCC`/`GND`: the port sits in the free top-right corner.
+            Pos2::new(
+                rect.right() - 8.0 * self.zoom,
+                rect.top() + 20.0 * self.zoom,
+            ),
+            Align2::RIGHT_TOP,
             format!("USART{}", uart.unit() + 1),
             self.font(8.5),
             base,
@@ -1461,8 +1613,11 @@ impl Schematic {
         );
 
         painter.text(
-            Pos2::new(center.x, rect.bottom() - 6.0 * self.zoom),
-            Align2::CENTER_BOTTOM,
+            Pos2::new(
+                rect.right() - 8.0 * self.zoom,
+                rect.bottom() - 5.0 * self.zoom,
+            ),
+            Align2::RIGHT_BOTTOM,
             format!("{}", encoder.detents()),
             self.font(8.5),
             COLOR_DIM,
@@ -1534,43 +1689,138 @@ pub fn content_bounds(board: &Board) -> Rect {
     bounds
 }
 
-/// Board space positions of every MCU pin.
-///
-/// The package is drawn as a square: port A on the left, port B on the right,
-/// the watch crystal pins of port C on the bottom edge and the HSE pins of port
-/// D on the top edge, the way an EDA symbol lays them out.
-fn mcu_pin_layout() -> Vec<(u8, u8, Side, Pos2)> {
-    let mut pins = Vec::with_capacity(37);
+/// One pin of the LQFP48 package, drawn where the real package puts it.
+struct McuPin {
+    /// Package pin number, `1..=48`.
+    number: u8,
+    /// Name printed on the symbol (`PA0`, `VDD`, `BOOT0`, ...).
+    name: &'static str,
+    /// Modelled port/pin; `None` for the supply, reset and boot pins the
+    /// simulator has no register for.
+    signal: Option<(u8, u8)>,
+    side: Side,
+    /// Tip of the stub, in board space.
+    pos: Pos2,
+}
+
+/// One row of the package table: pin number, silk name, modelled signal.
+type PackagePin = (u8, &'static str, Option<(u8, u8)>);
+
+/// The LQFP48 pinout, in package order: pins 1–12 down the left side, 13–24
+/// along the bottom, 25–36 up the right side and 37–48 back along the top.
+const LQFP48: [PackagePin; 48] = [
+    (1, "VBAT", None),
+    (2, "PC13", Some((2, 13))),
+    (3, "PC14", Some((2, 14))),
+    (4, "PC15", Some((2, 15))),
+    (5, "PD0", Some((3, 0))),
+    (6, "PD1", Some((3, 1))),
+    (7, "NRST", None),
+    (8, "VSSA", None),
+    (9, "VDDA", None),
+    (10, "PA0", Some((0, 0))),
+    (11, "PA1", Some((0, 1))),
+    (12, "PA2", Some((0, 2))),
+    (13, "PA3", Some((0, 3))),
+    (14, "PA4", Some((0, 4))),
+    (15, "PA5", Some((0, 5))),
+    (16, "PA6", Some((0, 6))),
+    (17, "PA7", Some((0, 7))),
+    (18, "PB0", Some((1, 0))),
+    (19, "PB1", Some((1, 1))),
+    (20, "PB2", Some((1, 2))),
+    (21, "PB10", Some((1, 10))),
+    (22, "PB11", Some((1, 11))),
+    (23, "VSS", None),
+    (24, "VDD", None),
+    (25, "PB12", Some((1, 12))),
+    (26, "PB13", Some((1, 13))),
+    (27, "PB14", Some((1, 14))),
+    (28, "PB15", Some((1, 15))),
+    (29, "PA8", Some((0, 8))),
+    (30, "PA9", Some((0, 9))),
+    (31, "PA10", Some((0, 10))),
+    (32, "PA11", Some((0, 11))),
+    (33, "PA12", Some((0, 12))),
+    (34, "PA13", Some((0, 13))),
+    (35, "VSS", None),
+    (36, "VDD", None),
+    (37, "PA14", Some((0, 14))),
+    (38, "PA15", Some((0, 15))),
+    (39, "PB3", Some((1, 3))),
+    (40, "PB4", Some((1, 4))),
+    (41, "PB5", Some((1, 5))),
+    (42, "PB6", Some((1, 6))),
+    (43, "PB7", Some((1, 7))),
+    (44, "BOOT0", None),
+    (45, "PB8", Some((1, 8))),
+    (46, "PB9", Some((1, 9))),
+    (47, "VSS", None),
+    (48, "VDD", None),
+];
+
+fn build_mcu_pins() -> Vec<McuPin> {
     let left_x = MCU_ORIGIN.x - MCU_STUB;
     let right_x = MCU_ORIGIN.x + MCU_SIZE.x + MCU_STUB;
     let top_y = MCU_ORIGIN.y - MCU_STUB;
     let bottom_y = MCU_ORIGIN.y + MCU_SIZE.y + MCU_STUB;
+    LQFP48
+        .iter()
+        .enumerate()
+        .map(|(index, (number, name, signal))| {
+            let (side, pos) = match index {
+                0..=11 => (
+                    Side::Left,
+                    Pos2::new(left_x, MCU_ORIGIN.y + FIRST_PIN + index as f32 * PIN_PITCH),
+                ),
+                12..=23 => (
+                    Side::Bottom,
+                    Pos2::new(
+                        MCU_ORIGIN.x + FIRST_PIN + (index - 12) as f32 * PIN_PITCH,
+                        bottom_y,
+                    ),
+                ),
+                24..=35 => (
+                    Side::Right,
+                    Pos2::new(
+                        right_x,
+                        MCU_ORIGIN.y + MCU_SIZE.y - FIRST_PIN - (index - 24) as f32 * PIN_PITCH,
+                    ),
+                ),
+                _ => (
+                    Side::Top,
+                    Pos2::new(
+                        MCU_ORIGIN.x + MCU_SIZE.x - FIRST_PIN - (index - 36) as f32 * PIN_PITCH,
+                        top_y,
+                    ),
+                ),
+            };
+            McuPin {
+                number: *number,
+                name,
+                signal: *signal,
+                side,
+                pos,
+            }
+        })
+        .collect()
+}
 
-    for pin in 0..16u8 {
-        let y = MCU_ORIGIN.y + FIRST_ROW + f32::from(pin) * PIN_PITCH;
-        pins.push((0u8, pin, Side::Left, Pos2::new(left_x, y)));
-    }
-    for pin in 0..16u8 {
-        let y = MCU_ORIGIN.y + FIRST_ROW + f32::from(pin) * PIN_PITCH;
-        pins.push((1u8, pin, Side::Right, Pos2::new(right_x, y)));
-    }
-    // PC13..PC15 (LSE crystal and the user button on a Blue Pill): spread along
-    // the bottom edge so their labels stay readable.
-    for (index, pin) in (13..16u8).enumerate() {
-        let fraction = (index as f32 + 1.0) / 4.0;
-        let x = MCU_ORIGIN.x + MCU_SIZE.x * fraction;
-        pins.push((2u8, pin, Side::Bottom, Pos2::new(x, bottom_y)));
-    }
-    // OSC_IN / OSC_OUT of the HSE crystal (PD0/PD1) on the top edge.
-    for (index, pin) in (0..2u8).enumerate() {
-        let fraction = match index {
-            0 => 0.25,
-            _ => 0.75,
-        };
-        let x = MCU_ORIGIN.x + MCU_SIZE.x * fraction;
-        pins.push((3u8, pin, Side::Top, Pos2::new(x, top_y)));
-    }
-    pins
+/// All 48 pins of the package, laid out once.
+fn mcu_pins() -> &'static [McuPin] {
+    static PINS: std::sync::LazyLock<Vec<McuPin>> = std::sync::LazyLock::new(build_mcu_pins);
+    &PINS
+}
+
+/// The pins the simulator models, as `(port, pin, side, position)`.
+fn mcu_pin_layout() -> Vec<(u8, u8, Side, Pos2)> {
+    mcu_pins()
+        .iter()
+        .filter_map(|pin| {
+            pin.signal
+                .map(|(port, index)| (port, index, pin.side, pin.pos))
+        })
+        .collect()
 }
 
 /// Bodies the wires have to go around, in board space.
@@ -1581,6 +1831,10 @@ pub fn obstacles_of(board: &Board) -> Vec<Rect> {
     let mut obstacles = Vec::with_capacity(board.devices().len() + 1);
     obstacles.push(Rect::from_min_size(MCU_ORIGIN, MCU_SIZE).expand(route::CLEARANCE));
     for device in board.devices() {
+        // A junction sits *on* the wire it taps, so it must not block it.
+        if device.kind == DeviceKind::Junction {
+            continue;
+        }
         obstacles.push(device.rect().expand(route::CLEARANCE));
     }
     obstacles
@@ -1593,10 +1847,14 @@ fn pin_dir(board: &Board, pin: PinRef) -> Option<Dir> {
             .into_iter()
             .find(|(layout_port, layout_pin, _, _)| *layout_port == port && *layout_pin == pin)
             .map(|(_, _, side, _)| dir_of(side)),
-        PinRef::Device { device, pin } => board
-            .device(device)
-            .and_then(|device| device.pin_def(pin))
-            .map(|def| dir_of(def.side)),
+        PinRef::Device { device, pin } => {
+            let device = board.device(device)?;
+            if device.kind == DeviceKind::Junction {
+                // A tap point has no body, so a wire may leave it any way.
+                return None;
+            }
+            device.pin_def(pin).map(|def| dir_of(def.side))
+        }
     }
 }
 
@@ -1636,14 +1894,22 @@ fn topology_stamp(board: &Board) -> u64 {
     hasher.finish()
 }
 
-fn distance_to_segment(point: Pos2, a: Pos2, b: Pos2) -> f32 {
+/// Snaps a board space point to the 2 unit grid the wire corners sit on.
+fn snap(point: Pos2) -> Pos2 {
+    Pos2::new((point.x / 2.0).round() * 2.0, (point.y / 2.0).round() * 2.0)
+}
+
+/// Distance from `point` to the segment `a`-`b`, plus the point on the segment
+/// that is closest to it.
+fn closest_on_segment(point: Pos2, a: Pos2, b: Pos2) -> (f32, Pos2) {
     let ab = b - a;
     let length_squared = ab.length_sq();
     if length_squared <= f32::EPSILON {
-        return point.distance(a);
+        return (point.distance(a), a);
     }
     let t = ((point - a).dot(ab) / length_squared).clamp(0.0, 1.0);
-    point.distance(a + ab * t)
+    let at = a + ab * t;
+    (point.distance(at), at)
 }
 
 #[cfg(test)]
@@ -1667,6 +1933,53 @@ mod tests {
     }
 
     #[test]
+    fn the_package_pins_follow_the_lqfp48_pinout() {
+        let pins = mcu_pins();
+        assert_eq!(pins.len(), 48);
+        // Numbers run 1..=48 counterclockwise around the package.
+        for (index, pin) in pins.iter().enumerate() {
+            assert_eq!(pin.number as usize, index + 1, "pin order");
+        }
+        // Anchors of the datasheet pinout.
+        assert_eq!((pins[0].name, pins[0].side), ("VBAT", Side::Left));
+        assert_eq!((pins[12].name, pins[12].side), ("PA3", Side::Bottom));
+        assert_eq!((pins[24].name, pins[24].side), ("PB12", Side::Right));
+        assert_eq!((pins[36].name, pins[36].side), ("PA14", Side::Top));
+        assert_eq!(pins[43].name, "BOOT0");
+        assert_eq!(pins[47].name, "VDD");
+        // Twelve pins per side, running the same way as the real package.
+        assert_eq!(pins.iter().filter(|pin| pin.side == Side::Left).count(), 12);
+        assert_eq!(
+            pins.iter().filter(|pin| pin.side == Side::Bottom).count(),
+            12
+        );
+        assert_eq!(
+            pins.iter().filter(|pin| pin.side == Side::Right).count(),
+            12
+        );
+        assert_eq!(pins.iter().filter(|pin| pin.side == Side::Top).count(), 12);
+        assert!(pins[0].pos.y < pins[11].pos.y, "pin 12 sits below pin 1");
+        assert!(pins[12].pos.x < pins[23].pos.x, "pin 24 sits right of 13");
+        assert!(pins[24].pos.y > pins[35].pos.y, "pin 36 sits above pin 25");
+        assert!(pins[36].pos.x > pins[47].pos.x, "pin 48 sits left of 37");
+
+        // Every port pin is on the package exactly where the datasheet puts it.
+        let place = |name: &str| {
+            let pin = pins
+                .iter()
+                .find(|pin| pin.name == name)
+                .expect("pin exists");
+            (pin.side, pin.signal)
+        };
+        assert_eq!(place("PA0"), (Side::Left, Some((0, 0))));
+        assert_eq!(place("PA7"), (Side::Bottom, Some((0, 7))));
+        assert_eq!(place("PB12"), (Side::Right, Some((1, 12))));
+        assert_eq!(place("PA14"), (Side::Top, Some((0, 14))));
+        assert_eq!(place("PD0"), (Side::Left, Some((3, 0))));
+        assert_eq!(place("NRST"), (Side::Left, None));
+    }
+
+    #[test]
     fn routing_uses_orthogonal_segments() {
         let points = route::route_between(Pos2::new(0.0, 0.0), Pos2::new(100.0, 50.0), &[]);
         assert_eq!(points.len(), 3);
@@ -1678,9 +1991,10 @@ mod tests {
     fn point_to_segment_distance_handles_endpoints() {
         let a = Pos2::new(0.0, 0.0);
         let b = Pos2::new(10.0, 0.0);
-        assert!(distance_to_segment(Pos2::new(5.0, 3.0), a, b) - 3.0 < 1e-3);
-        assert!(distance_to_segment(Pos2::new(-4.0, 0.0), a, b) - 4.0 < 1e-3);
-        assert!(distance_to_segment(Pos2::new(0.0, 0.0), a, a) < 1e-3);
+        let distance = |point| closest_on_segment(point, a, b).0;
+        assert!(distance(Pos2::new(5.0, 3.0)) - 3.0 < 1e-3);
+        assert!(distance(Pos2::new(-4.0, 0.0)) - 4.0 < 1e-3);
+        assert!(closest_on_segment(Pos2::new(0.0, 0.0), a, a).0 < 1e-3);
     }
 
     #[test]
@@ -1704,9 +2018,21 @@ mod tests {
         board: &mut Board,
         events: Vec<egui::Event>,
     ) -> egui::FullOutput {
+        canvas_frame_at(ctx, schematic, board, events, None)
+    }
+
+    /// Runs one canvas frame at `time` (egui counts double clicks in seconds).
+    fn canvas_frame_at(
+        ctx: &egui::Context,
+        schematic: &mut Schematic,
+        board: &mut Board,
+        events: Vec<egui::Event>,
+        time: Option<f64>,
+    ) -> egui::FullOutput {
         let levels = PinLevels::default();
         let state = board.evaluate(&levels);
         let input = egui::RawInput {
+            time,
             screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1200.0, 800.0))),
             events,
             ..Default::default()
@@ -1759,9 +2085,49 @@ mod tests {
         );
     }
 
+    /// Runs the frames of one primary click at `screen`, at `time` seconds.
+    ///
+    /// Two clicks closer than `max_double_click_delay` count as one double
+    /// click, so the times decide what gesture the canvas sees.
+    fn primary_click(
+        ctx: &egui::Context,
+        schematic: &mut Schematic,
+        board: &mut Board,
+        screen: Pos2,
+        time: f64,
+    ) {
+        canvas_frame_at(
+            ctx,
+            schematic,
+            board,
+            vec![egui::Event::PointerMoved(screen)],
+            Some(time),
+        );
+        canvas_frame_at(
+            ctx,
+            schematic,
+            board,
+            vec![
+                egui::Event::PointerButton {
+                    pos: screen,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::default(),
+                },
+                egui::Event::PointerButton {
+                    pos: screen,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::default(),
+                },
+            ],
+            Some(time),
+        );
+    }
+
     #[test]
-    fn clicking_a_wire_selects_it_and_double_clicking_adds_a_corner() {
-        let (mut board, _) = blocked_board();
+    fn clicking_a_wire_selects_it_and_double_clicking_adds_a_junction() {
+        let (mut board, led) = blocked_board();
         let mut schematic = Schematic::default();
         let ctx = egui::Context::default();
         canvas_frame(&ctx, &mut schematic, &mut board, Vec::new());
@@ -1777,69 +2143,61 @@ mod tests {
         let origin = schematic.last_rect.min;
         let screen = schematic.to_screen(middle, origin);
 
-        canvas_frame(
-            &ctx,
-            &mut schematic,
-            &mut board,
-            vec![egui::Event::PointerMoved(screen)],
-        );
-        canvas_frame(
-            &ctx,
-            &mut schematic,
-            &mut board,
-            vec![
-                egui::Event::PointerButton {
-                    pos: screen,
-                    button: egui::PointerButton::Primary,
-                    pressed: true,
-                    modifiers: egui::Modifiers::default(),
-                },
-                egui::Event::PointerButton {
-                    pos: screen,
-                    button: egui::PointerButton::Primary,
-                    pressed: false,
-                    modifiers: egui::Modifiers::default(),
-                },
-            ],
-        );
+        primary_click(&ctx, &mut schematic, &mut board, screen, 1.0);
         assert_eq!(schematic.selected(), Some(Selection::Wire(0)));
 
-        // A double click on the same spot drops a corner there.
-        canvas_frame(
-            &ctx,
-            &mut schematic,
-            &mut board,
-            vec![
-                egui::Event::PointerButton {
-                    pos: screen,
-                    button: egui::PointerButton::Primary,
-                    pressed: true,
-                    modifiers: egui::Modifiers::default(),
-                },
-                egui::Event::PointerButton {
-                    pos: screen,
-                    button: egui::PointerButton::Primary,
-                    pressed: false,
-                    modifiers: egui::Modifiers::default(),
-                },
-            ],
+        // A double click on the same spot splices in a tap point.
+        primary_click(&ctx, &mut schematic, &mut board, screen, 1.05);
+        let junction = board.first_of(DeviceKind::Junction).expect("a junction");
+        let tap = PinRef::Device {
+            device: junction.id,
+            pin: 0,
+        };
+        assert!(
+            board
+                .wires()
+                .iter()
+                .all(|wire| wire.a == tap || wire.b == tap),
+            "the wire was split into two halves that end on the tap"
         );
-        assert_eq!(
-            board.wires()[0].bends.len(),
-            1,
-            "double click adds a corner"
+        assert!(
+            board.same_net(
+                PinRef::Mcu { port: 0, pin: 5 },
+                PinRef::Device {
+                    device: led,
+                    pin: 0
+                }
+            ),
+            "the tap must not break the wire it sits on"
         );
-        assert_eq!(
-            schematic.selected(),
-            Some(Selection::Bend { wire: 0, bend: 0 })
-        );
+        assert_eq!(schematic.selected(), Some(Selection::Device(junction.id)));
+        assert!((junction.pin_pos(0) - middle).length() < 2.0);
 
-        // The selected corner is drawn as a handle the user can grab.
+        // The selected tap is ringed, so the user sees what a double click hits.
         let output = canvas_frame(&ctx, &mut schematic, &mut board, Vec::new());
         assert!(
-            filled_rects(&output, Color32::WHITE) > 0,
-            "the corner handle was not painted"
+            circle_strokes(&output, Color32::WHITE) > 0,
+            "the tap was not ringed"
         );
+        // Both halves keep being routed as orthogonal wires.
+        assert_eq!(schematic.routes.len(), 2);
+        for routed in &schematic.routes {
+            assert!(routed.points.len() >= 2, "a half lost its route");
+            assert!(route::orthogonal(&routed.points), "{:?}", routed.points);
+        }
+
+        // Double clicking the tap again takes it away and restores one wire.
+        primary_click(&ctx, &mut schematic, &mut board, screen, 3.0);
+        primary_click(&ctx, &mut schematic, &mut board, screen, 3.05);
+        assert!(board.first_of(DeviceKind::Junction).is_none());
+        assert_eq!(board.wires().len(), 1, "the halves were fused back");
+        assert!(board.is_connected(
+            PinRef::Mcu { port: 0, pin: 5 },
+            PinRef::Device {
+                device: led,
+                pin: 0
+            }
+        ));
     }
 
     #[test]
@@ -1909,11 +2267,11 @@ mod tests {
         count
     }
 
-    /// Filled rectangles painted with `color`.
-    fn filled_rects(output: &egui::FullOutput, color: Color32) -> usize {
+    /// Circles stroked with `color`.
+    fn circle_strokes(output: &egui::FullOutput, color: Color32) -> usize {
         fn walk(shape: &egui::Shape, color: Color32, count: &mut usize) {
             match shape {
-                egui::Shape::Rect(rect) if rect.fill == color => *count += 1,
+                egui::Shape::Circle(circle) if circle.stroke.color == color => *count += 1,
                 egui::Shape::Vec(shapes) => {
                     for shape in shapes {
                         walk(shape, color, count);

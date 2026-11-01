@@ -151,6 +151,12 @@ pub enum DeviceKind {
     Resistor,
     /// Oscilloscope probe on the two wires of the CAN pair.
     Scope,
+    /// Tap point on a wire (also usable as a free standing terminal).
+    ///
+    /// Double clicking a wire splices one in: the wire is split into two halves
+    /// that both end on the junction's only pin, so anything wired to that pin
+    /// joins the same net.
+    Junction,
 }
 
 /// Pin index of the terminal's receive contact (data from the MCU).
@@ -205,6 +211,8 @@ pub const MATRIX_DOUT: u8 = 3;
 pub const MATRIX_VCC: u8 = 4;
 /// Pin index of the matrix module's `GND` contact.
 pub const MATRIX_GND: u8 = 5;
+/// Pin index of the only pin of a junction (the tap point itself).
+pub const JUNCTION_PIN: u8 = 0;
 /// Pin index of the first crystal terminal.
 pub const CRYSTAL_X1: u8 = 0;
 /// Pin index of the second crystal terminal.
@@ -237,7 +245,7 @@ pub const UART_PINS: [PinDef; 4] = [
     PinDef {
         name: "TX",
         role: PinRole::Tx,
-        side: Side::Right,
+        side: Side::Left,
     },
     PinDef {
         name: "VCC",
@@ -247,7 +255,7 @@ pub const UART_PINS: [PinDef; 4] = [
     PinDef {
         name: "GND",
         role: PinRole::Ground,
-        side: Side::Bottom,
+        side: Side::Top,
     },
 ];
 
@@ -265,7 +273,7 @@ pub const ENCODER_PINS: [PinDef; 5] = [
     PinDef {
         name: "SW",
         role: PinRole::Button,
-        side: Side::Right,
+        side: Side::Left,
     },
     PinDef {
         name: "VCC",
@@ -275,7 +283,7 @@ pub const ENCODER_PINS: [PinDef; 5] = [
     PinDef {
         name: "GND",
         role: PinRole::Ground,
-        side: Side::Bottom,
+        side: Side::Top,
     },
 ];
 
@@ -291,7 +299,7 @@ pub const GND_PINS: [PinDef; 1] = [PinDef {
     side: Side::Right,
 }];
 
-pub const CAN_PINS: [PinDef; 4] = [
+pub const CAN_PINS: [PinDef; 6] = [
     PinDef {
         name: "TXD",
         role: PinRole::Rx,
@@ -300,7 +308,7 @@ pub const CAN_PINS: [PinDef; 4] = [
     PinDef {
         name: "RXD",
         role: PinRole::Tx,
-        side: Side::Right,
+        side: Side::Left,
     },
     // The two wire contacts sit on the bus side of the part.
     PinDef {
@@ -312,6 +320,16 @@ pub const CAN_PINS: [PinDef; 4] = [
         name: "CANL",
         role: PinRole::Bus,
         side: Side::Right,
+    },
+    PinDef {
+        name: "VCC",
+        role: PinRole::Vcc,
+        side: Side::Top,
+    },
+    PinDef {
+        name: "GND",
+        role: PinRole::Ground,
+        side: Side::Top,
     },
 ];
 
@@ -341,6 +359,14 @@ pub const SCOPE_PINS: [PinDef; 2] = [
     },
 ];
 
+/// The junction has a single contact, the tap point itself; it is drawn at the
+/// centre of the symbol rather than on a stub.
+pub const JUNCTION_PINS: [PinDef; 1] = [PinDef {
+    name: "T",
+    role: PinRole::Terminal,
+    side: Side::Right,
+}];
+
 pub const CRYSTAL_PINS: [PinDef; 2] = [
     PinDef {
         name: "X1",
@@ -354,7 +380,7 @@ pub const CRYSTAL_PINS: [PinDef; 2] = [
     },
 ];
 
-pub const MATRIX_PINS: [PinDef; 4] = [
+pub const MATRIX_PINS: [PinDef; 6] = [
     PinDef {
         name: "DIN",
         role: PinRole::Rx,
@@ -375,10 +401,20 @@ pub const MATRIX_PINS: [PinDef; 4] = [
         role: PinRole::Tx,
         side: Side::Right,
     },
+    PinDef {
+        name: "VCC",
+        role: PinRole::Vcc,
+        side: Side::Top,
+    },
+    PinDef {
+        name: "GND",
+        role: PinRole::Ground,
+        side: Side::Top,
+    },
 ];
 
 impl DeviceKind {
-    pub const ALL: [DeviceKind; 11] = [
+    pub const ALL: [DeviceKind; 12] = [
         DeviceKind::Led,
         DeviceKind::Uart,
         DeviceKind::Encoder,
@@ -390,6 +426,7 @@ impl DeviceKind {
         DeviceKind::LseCrystal,
         DeviceKind::Resistor,
         DeviceKind::Scope,
+        DeviceKind::Junction,
     ];
 
     pub fn pins(self) -> &'static [PinDef] {
@@ -404,6 +441,7 @@ impl DeviceKind {
             DeviceKind::HseCrystal | DeviceKind::LseCrystal => &CRYSTAL_PINS,
             DeviceKind::Resistor => &RESISTOR_PINS,
             DeviceKind::Scope => &SCOPE_PINS,
+            DeviceKind::Junction => &JUNCTION_PINS,
         }
     }
 
@@ -418,6 +456,7 @@ impl DeviceKind {
             DeviceKind::HseCrystal | DeviceKind::LseCrystal => Vec2::new(84.0, 56.0),
             DeviceKind::Resistor => Vec2::new(96.0, 44.0),
             DeviceKind::Scope => Vec2::new(132.0, 88.0),
+            DeviceKind::Junction => Vec2::splat(16.0),
         }
     }
 
@@ -435,6 +474,7 @@ impl DeviceKind {
             DeviceKind::LseCrystal => "LSE",
             DeviceKind::Resistor => "R",
             DeviceKind::Scope => "OSC",
+            DeviceKind::Junction => "J",
         }
     }
 
@@ -452,6 +492,7 @@ impl DeviceKind {
             DeviceKind::LseCrystal => "LSE 晶振",
             DeviceKind::Resistor => "电阻",
             DeviceKind::Scope => "示波器",
+            DeviceKind::Junction => "接线节点",
         }
     }
 
@@ -467,6 +508,7 @@ impl DeviceKind {
             DeviceKind::HseCrystal | DeviceKind::LseCrystal => "时钟",
             DeviceKind::Resistor => "无源",
             DeviceKind::Scope => "仪器",
+            DeviceKind::Junction => "连接",
         }
     }
 
@@ -484,6 +526,7 @@ impl DeviceKind {
             DeviceKind::LseCrystal => "32.768 kHz 晶振，接到 PC14/PC15",
             DeviceKind::Resistor => "跨接 CANH/CANL 的终端电阻",
             DeviceKind::Scope => "抓取 CANH/CANL 波形的示波器",
+            DeviceKind::Junction => "双击导线插入的分支点，可当接线端子",
         }
     }
 
@@ -502,6 +545,7 @@ impl DeviceKind {
             DeviceKind::LseCrystal => "lse 晶振 crystal 32.768khz 32768 晶体 振荡器 rtc osc32",
             DeviceKind::Resistor => "resistor 电阻 终端电阻 120r 120欧 termination 无源",
             DeviceKind::Scope => "oscilloscope scope 示波器 波形 探头 抓波 仪器",
+            DeviceKind::Junction => "junction 节点 接线 端子 连接点 分支 tap 引出",
         }
     }
 
@@ -519,6 +563,7 @@ impl DeviceKind {
             DeviceKind::LseCrystal => "lse-crystal",
             DeviceKind::Resistor => "resistor",
             DeviceKind::Scope => "scope",
+            DeviceKind::Junction => "junction",
         }
     }
 
@@ -556,12 +601,24 @@ impl DeviceKind {
             .map(|index| index as u8)
     }
 
+    /// The `(VCC, GND)` contacts of the part, when its symbol has a supply.
+    pub fn supply_pins(self) -> Option<(u8, u8)> {
+        Some((
+            self.pin_with_role(PinRole::Vcc)?,
+            self.pin_with_role(PinRole::Ground)?,
+        ))
+    }
+
     /// Connection point of `pin` for a symbol of this kind whose body occupies
     /// `rect`, at the tip of its stub.
     ///
     /// Pins are spread evenly along the side they belong to, so a symbol with
     /// two contacts on the left (`encoder A`/`B`) does not stack them.
     pub fn pin_pos(self, rect: egui::Rect, pin: u8) -> Pos2 {
+        if self == DeviceKind::Junction {
+            // A tap point: the contact is the dot itself, without a stub.
+            return rect.center();
+        }
         let Some(def) = self.pins().get(pin as usize) else {
             return rect.center();
         };
@@ -767,6 +824,24 @@ impl Board {
         }
     }
 
+    /// A newly opened project: only the HSE crystal the chip needs, already
+    /// wired across `OSC_IN`/`OSC_OUT`. Everything else is placed from the
+    /// device library.
+    pub fn new_project() -> Self {
+        let mut board = Board::new();
+        let hse = board.add_hse_crystal(Pos2::new(300.0, 470.0));
+        for (index, (port, pin)) in [(CRYSTAL_X1, HSE_PINS[0]), (CRYSTAL_X2, HSE_PINS[1])] {
+            board.connect(
+                PinRef::Device {
+                    device: hse,
+                    pin: index,
+                },
+                PinRef::Mcu { port, pin },
+            );
+        }
+        board
+    }
+
     /// Board shipped on first start: `VCC`/`GND` power symbols, an LED wired to
     /// PA5 and GND (so the built-in stimulus makes it blink right away), a UART
     /// terminal on USART1's pins, a rotary encoder on PA0/PA1/PA2 and both
@@ -775,7 +850,7 @@ impl Board {
     pub fn demo() -> Self {
         let mut board = Board::new();
 
-        board.add_vcc(Pos2::new(430.0, 110.0));
+        let vcc = board.add_vcc(Pos2::new(430.0, 110.0));
         let gnd = board.add_gnd(Pos2::new(430.0, 200.0));
 
         let led = board.add_led(Pos2::new(600.0, 120.0));
@@ -824,6 +899,33 @@ impl Board {
                 PinRef::Mcu {
                     port: 0,
                     pin: mcu_pin,
+                },
+            );
+        }
+
+        // Both parts with a supply are fed from the two power symbols.
+        for (device, vcc_pin, gnd_pin) in [
+            (uart, UART_VCC, UART_GND),
+            (encoder, ENCODER_VCC, ENCODER_GND),
+        ] {
+            board.connect(
+                PinRef::Device {
+                    device: vcc,
+                    pin: POWER_PIN,
+                },
+                PinRef::Device {
+                    device,
+                    pin: vcc_pin,
+                },
+            );
+            board.connect(
+                PinRef::Device {
+                    device: gnd,
+                    pin: POWER_PIN,
+                },
+                PinRef::Device {
+                    device,
+                    pin: gnd_pin,
                 },
             );
         }
@@ -903,7 +1005,9 @@ impl Board {
         self.next_id += 1;
         let index = self.devices.iter().filter(|d| d.kind == kind).count() + 1;
         let hardware = match kind {
-            DeviceKind::Led | DeviceKind::Vcc | DeviceKind::Gnd => Hardware::None,
+            DeviceKind::Led | DeviceKind::Vcc | DeviceKind::Gnd | DeviceKind::Junction => {
+                Hardware::None
+            }
             DeviceKind::Uart => Hardware::Uart(gsim_devices::Uart::new(0)),
             DeviceKind::Encoder => Hardware::Encoder(gsim_devices::Encoder::new()),
             DeviceKind::Can => {
@@ -1025,8 +1129,8 @@ impl Board {
                 port: output.0,
                 pin: output.1,
             };
-            let wired = (self.is_connected(x1, in_pin) && self.is_connected(x2, out_pin))
-                || (self.is_connected(x1, out_pin) && self.is_connected(x2, in_pin));
+            let wired = (self.same_net(x1, in_pin) && self.same_net(x2, out_pin))
+                || (self.same_net(x1, out_pin) && self.same_net(x2, in_pin));
             if !wired {
                 continue;
             }
@@ -1045,30 +1149,144 @@ impl Board {
         &mut self.devices
     }
 
-    /// The MCU pin `pin` is wired to, if any (only a direct wire to an MCU pin
-    /// is reported; a pin behind another part is not resolved).
+    /// The MCU pin on the same net as `pin`, if any.
+    ///
+    /// Junctions (and the corners they split a wire into) are transparent here,
+    /// so tapping a wire does not stop the part from seeing the controller.
     pub fn mcu_pin_for(&self, pin: PinRef) -> Option<(u8, u8)> {
-        for wire in &self.wires {
-            let other = if wire.a == pin {
-                wire.b
-            } else if wire.b == pin {
-                wire.a
-            } else {
-                continue;
-            };
-            if let PinRef::Mcu { port, pin } = other {
-                return Some((port, pin));
+        self.net_pins(pin).into_iter().find_map(|node| match node {
+            PinRef::Mcu { port, pin } => Some((port, pin)),
+            _ => None,
+        })
+    }
+
+    /// Every pin reachable from `pin` through wires, `pin` included.
+    ///
+    /// Wires are the only thing that joins two pins, so this is the net `pin`
+    /// belongs to; a device never shorts its own contacts.
+    fn net_pins(&self, pin: PinRef) -> Vec<PinRef> {
+        let mut net = vec![pin];
+        let mut next = 0;
+        while next < net.len() {
+            let node = net[next];
+            next += 1;
+            for wire in &self.wires {
+                let other = if wire.a == node {
+                    wire.b
+                } else if wire.b == node {
+                    wire.a
+                } else {
+                    continue;
+                };
+                if !net.contains(&other) {
+                    net.push(other);
+                }
             }
         }
-        None
+        net
+    }
+
+    /// True when the two pins sit on the same net, junctions included.
+    ///
+    /// [`Board::is_connected`] only looks at a single wire, which is what the
+    /// duplicate check of [`Board::connect`] needs; this one answers the
+    /// electrical question the bridge asks.
+    pub fn same_net(&self, a: PinRef, b: PinRef) -> bool {
+        a == b || self.net_pins(a).contains(&b)
     }
 
     /// Removes a device together with every wire that touched it.
+    ///
+    /// Removing a junction joins the two wire halves it spliced back into one
+    /// wire, so deleting a tap leaves the original connection intact.
     pub fn remove_device(&mut self, id: DeviceId) {
+        if self
+            .device(id)
+            .is_some_and(|device| device.kind == DeviceKind::Junction)
+        {
+            self.remove_junction(id);
+            return;
+        }
         self.devices.retain(|device| device.id != id);
         self.wires.retain(|wire| {
             !matches!(wire.a, PinRef::Device { device, .. } if device == id)
                 && !matches!(wire.b, PinRef::Device { device, .. } if device == id)
+        });
+    }
+
+    /// Splices a junction into `wire` at `point` and returns its id.
+    ///
+    /// `leg` is the route leg the user double clicked (`0` = right after pin
+    /// `a`), exactly like [`Board::insert_bend`]. The wire becomes two wires
+    /// that both end on the junction's only pin, which is how the tap joins the
+    /// net without breaking it.
+    pub fn add_junction(&mut self, wire: usize, leg: usize, point: Pos2) -> Option<DeviceId> {
+        let mut original = self.wires.get(wire)?.clone();
+        if leg > original.bends.len() {
+            return None;
+        }
+        let id = self.add_device(
+            DeviceKind::Junction,
+            point - DeviceKind::Junction.body_size() * 0.5,
+        );
+        let pin = PinRef::Device {
+            device: id,
+            pin: JUNCTION_PIN,
+        };
+        let after = original.bends.split_off(leg);
+        self.wires[wire] = Wire {
+            a: original.a,
+            b: pin,
+            bends: original.bends,
+        };
+        self.wires.push(Wire {
+            a: pin,
+            b: original.b,
+            bends: after,
+        });
+        Some(id)
+    }
+
+    /// Dissolves a junction, fusing the two halves it spliced into one wire.
+    ///
+    /// Any extra wire the user ran to the tap keeps its end: when the junction
+    /// carries more (or fewer) than two wires it is dropped like any other
+    /// device, taking those wires with it.
+    fn remove_junction(&mut self, id: DeviceId) {
+        let pin = PinRef::Device {
+            device: id,
+            pin: JUNCTION_PIN,
+        };
+        // End of the wire away from the junction, with the corners listed in
+        // the direction junction -> other.
+        let mut halves: Vec<(usize, PinRef, Vec<Pos2>)> = Vec::new();
+        for (index, wire) in self.wires.iter().enumerate() {
+            if wire.a == pin {
+                halves.push((index, wire.b, wire.bends.clone()));
+            } else if wire.b == pin {
+                let mut bends = wire.bends.clone();
+                bends.reverse();
+                halves.push((index, wire.a, bends));
+            }
+        }
+        self.devices.retain(|device| device.id != id);
+        let mut indices: Vec<usize> = halves.iter().map(|(index, _, _)| *index).collect();
+        indices.sort_unstable();
+        for index in indices.into_iter().rev() {
+            self.wires.remove(index);
+        }
+        let [(_, from, bends), (_, to, after)] = halves.as_slice() else {
+            return;
+        };
+        if from == to || self.is_connected(*from, *to) {
+            return;
+        }
+        let mut merged: Vec<Pos2> = bends.iter().rev().copied().collect();
+        merged.extend(after.iter().copied());
+        self.wires.push(Wire {
+            a: *from,
+            b: *to,
+            bends: merged,
         });
     }
 
@@ -1141,26 +1359,26 @@ impl Board {
         (index < self.wires.len()).then(|| self.wires.remove(index))
     }
 
+    /// Removes every wire, and with them the junctions that tapped one.
     pub fn clear_wires(&mut self) {
         self.wires.clear();
+        self.devices
+            .retain(|device| device.kind != DeviceKind::Junction);
     }
 
     /// How the CAN pair is wired: the two nets, the terminators bridging them
     /// and the probes tapping them.
-    pub fn can_network(&self) -> CanNetwork {
-        let nets = self.nets();
-        let mut net_of: HashMap<PinRef, usize> = HashMap::new();
-        for (index, net) in nets.iter().enumerate() {
-            for node in net {
-                net_of.insert(*node, index);
-            }
-        }
+    ///
+    /// `powered` decides which transceivers count as being on the pair, so the
+    /// bridge can leave a part that has no supply out of the circuit.
+    pub fn can_network_with(&self, powered: impl Fn(DeviceId) -> bool) -> CanNetwork {
+        let (_, net_of) = self.nets_and_index();
         let net_of_pin =
             |device: DeviceId, pin: u8| net_of.get(&PinRef::Device { device, pin }).copied();
 
         let mut network = CanNetwork::default();
         for device in &self.devices {
-            if device.kind != DeviceKind::Can {
+            if device.kind != DeviceKind::Can || !powered(device.id) {
                 continue;
             }
             let (Some(canh), Some(canl)) = (
@@ -1217,6 +1435,11 @@ impl Board {
         network
     }
 
+    /// How the CAN pair is wired, with every placed transceiver taking part.
+    pub fn can_network(&self) -> CanNetwork {
+        self.can_network_with(|_| true)
+    }
+
     /// Pins grouped into electrically connected nets, including single pins.
     pub fn nets(&self) -> Vec<Vec<PinRef>> {
         let mut sets: Vec<Vec<PinRef>> = Vec::new();
@@ -1238,16 +1461,56 @@ impl Board {
         sets
     }
 
-    /// Level of every net, plus the state of every device, for one snapshot of
-    /// the simulated pin levels.
-    pub fn evaluate(&self, levels: &PinLevels) -> BoardState {
+    /// Nets plus the net index of every pin on them.
+    fn nets_and_index(&self) -> (Vec<Vec<PinRef>>, HashMap<PinRef, usize>) {
         let nets = self.nets();
-        let mut net_of: HashMap<PinRef, usize> = HashMap::new();
+        let mut net_of = HashMap::new();
         for (index, net) in nets.iter().enumerate() {
             for node in net {
                 net_of.insert(*node, index);
             }
         }
+        (nets, net_of)
+    }
+
+    /// Supply state of every part whose symbol has `VCC`/`GND` contacts.
+    ///
+    /// The bridge asks for this once per slice: a part whose supply is open or
+    /// sits on the wrong rails is left out of the wiring, so it really stops
+    /// working instead of quietly running without power.
+    pub fn supplies(&self, levels: &PinLevels) -> BTreeMap<DeviceId, Supply> {
+        let (nets, net_of) = self.nets_and_index();
+        self.supplies_in(&nets, &net_of, levels)
+    }
+
+    fn supplies_in(
+        &self,
+        nets: &[Vec<PinRef>],
+        net_of: &HashMap<PinRef, usize>,
+        levels: &PinLevels,
+    ) -> BTreeMap<DeviceId, Supply> {
+        let mut supplies = BTreeMap::new();
+        for device in &self.devices {
+            let Some((vcc, gnd)) = device.kind.supply_pins() else {
+                continue;
+            };
+            let level_of = |pin: u8| {
+                net_of
+                    .get(&PinRef::Device {
+                        device: device.id,
+                        pin,
+                    })
+                    .map(|index| self.net_level(&nets[*index], levels))
+            };
+            supplies.insert(device.id, Supply::of(level_of(vcc), level_of(gnd)));
+        }
+        supplies
+    }
+
+    /// Level of every net, plus the state of every device, for one snapshot of
+    /// the simulated pin levels.
+    pub fn evaluate(&self, levels: &PinLevels) -> BoardState {
+        let (nets, net_of) = self.nets_and_index();
 
         let mut levels_of_nets = Vec::with_capacity(nets.len());
         let mut shorts = Vec::new();
@@ -1282,11 +1545,14 @@ impl Board {
             }
         }
 
+        let supplies = self.supplies_in(&nets, &net_of, levels);
+
         BoardState {
             nets,
             levels_of_nets,
             shorts,
             leds,
+            supplies,
         }
     }
 
@@ -1391,11 +1657,57 @@ pub struct BoardState {
     pub levels_of_nets: Vec<NetLevel>,
     pub shorts: Vec<Vec<PinRef>>,
     pub leds: BTreeMap<DeviceId, bool>,
+    /// Supply state of every part whose symbol has `VCC`/`GND` contacts.
+    pub supplies: BTreeMap<DeviceId, Supply>,
 }
 
 impl BoardState {
     pub fn led_lit(&self, id: DeviceId) -> bool {
         self.leds.get(&id).copied().unwrap_or(false)
+    }
+
+    /// How the supply of `id` is wired, `None` for parts without power pins.
+    pub fn supply(&self, id: DeviceId) -> Option<Supply> {
+        self.supplies.get(&id).copied()
+    }
+}
+
+/// How the `VCC`/`GND` contacts of a placed part are wired.
+///
+/// Only a part whose supply sits on the right rails takes part in the
+/// simulation: the bridge leaves unpowered (or miswired) parts out of the
+/// wiring, so a terminal without power really stays silent.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Supply {
+    /// At least one of the two contacts is not wired yet.
+    Unwired,
+    /// `VCC` sits on a high net and `GND` on a low one.
+    Powered,
+    /// Both contacts are wired, but not to the rails they belong to.
+    Fault,
+}
+
+impl Supply {
+    fn of(vcc: Option<NetLevel>, gnd: Option<NetLevel>) -> Self {
+        match (vcc, gnd) {
+            (Some(NetLevel::High), Some(NetLevel::Low)) => Supply::Powered,
+            (None, _) | (_, None) => Supply::Unwired,
+            _ => Supply::Fault,
+        }
+    }
+
+    /// True when the part is allowed to run.
+    pub fn works(self) -> bool {
+        matches!(self, Supply::Powered)
+    }
+
+    /// Chinese label for the device list.
+    pub fn label(self) -> &'static str {
+        match self {
+            Supply::Powered => "VCC/GND 已接",
+            Supply::Unwired => "VCC/GND 未接（不工作）",
+            Supply::Fault => "VCC/GND 接错（不工作）",
+        }
     }
 }
 
@@ -1406,7 +1718,10 @@ impl BoardState {
 impl Board {
     /// Copies the state of the placed transceiver and LED matrix into
     /// `snapshot`, and appends their rows to the peripheral browser.
-    pub fn fill_snapshot(&self, snapshot: &mut crate::sim::Snapshot) {
+    ///
+    /// `levels` decides which transceivers are powered, so the CAN window shows
+    /// the same pair the bridge is actually driving.
+    pub fn fill_snapshot(&self, snapshot: &mut crate::sim::Snapshot, levels: &PinLevels) {
         if let Some(matrix) = self.matrices().first() {
             snapshot.matrix = crate::sim::MatrixSnapshot::of(&matrix.borrow());
         }
@@ -1421,7 +1736,10 @@ impl Board {
             }
             None => snapshot.can.observe(&self.can_bus.borrow(), None),
         }
-        snapshot.can.network = self.can_network();
+        let supplies = self.supplies(levels);
+        snapshot.can.network = self.can_network_with(|id| {
+            !matches!(supplies.get(&id), Some(Supply::Unwired | Supply::Fault))
+        });
         snapshot.scopes = self
             .scopes()
             .iter()
@@ -1746,13 +2064,28 @@ mod tests {
         );
         assert_eq!(board.first_of(DeviceKind::Uart).unwrap().name, "UART1");
         assert_eq!(board.first_of(DeviceKind::Encoder).unwrap().name, "ENC1");
-        // LED: 2 wires, UART: 2, encoder: 3, HSE crystal: 2, LSE crystal: 2.
-        assert_eq!(board.wires().len(), 11);
+        // LED: 2 wires, UART: 2 + VCC/GND, encoder: 3 + VCC/GND, HSE: 2, LSE: 2.
+        assert_eq!(board.wires().len(), 15);
         assert_eq!(
             board.crystals(),
             Crystals {
                 hse_hz: Some(8_000_000),
                 lse: true,
+            }
+        );
+    }
+
+    #[test]
+    fn a_new_project_only_carries_the_hse_crystal() {
+        let board = Board::new_project();
+        let kinds: Vec<DeviceKind> = board.devices().iter().map(|device| device.kind).collect();
+        assert_eq!(kinds, vec![DeviceKind::HseCrystal]);
+        assert_eq!(board.wires().len(), 2, "X1/X2 already wired to OSC_IN/OUT");
+        assert_eq!(
+            board.crystals(),
+            Crystals {
+                hse_hz: Some(8_000_000),
+                lse: false,
             }
         );
     }
@@ -1874,10 +2207,80 @@ mod tests {
         let b = device.pin_pos(ENCODER_B);
         let sw = device.pin_pos(ENCODER_SW);
         assert_eq!(a.x, b.x, "A and B are on the same side");
-        assert!(a.y < b.y, "the two contacts must not overlap");
-        assert!(sw.x > device.rect().right());
+        assert_eq!(
+            a.x, sw.x,
+            "SW is a controller signal, so it joins A/B on the left"
+        );
+        assert!(a.y < b.y && b.y < sw.y, "the contacts must not overlap");
         assert!(a.x < device.rect().left());
         assert!((a.y - b.y).abs() > 8.0);
+        // The two supply contacts share the top edge, VCC left of GND.
+        let vcc = device.pin_pos(ENCODER_VCC);
+        let gnd = device.pin_pos(ENCODER_GND);
+        assert!(vcc.y < device.rect().top() && gnd.y < device.rect().top());
+        assert_eq!(vcc.y, gnd.y);
+        assert!(vcc.x < gnd.x);
+    }
+
+    #[test]
+    fn pins_are_grouped_by_electrical_role() {
+        // Signals that talk to the controller sit on the left, bus/output
+        // contacts on the right, and both supply contacts along the top.
+        let expected: [(DeviceKind, &[(u8, Side)]); 4] = [
+            (
+                DeviceKind::Uart,
+                &[
+                    (UART_RX, Side::Left),
+                    (UART_TX, Side::Left),
+                    (UART_VCC, Side::Top),
+                    (UART_GND, Side::Top),
+                ],
+            ),
+            (
+                DeviceKind::Encoder,
+                &[
+                    (ENCODER_A, Side::Left),
+                    (ENCODER_B, Side::Left),
+                    (ENCODER_SW, Side::Left),
+                    (ENCODER_VCC, Side::Top),
+                    (ENCODER_GND, Side::Top),
+                ],
+            ),
+            (
+                DeviceKind::Can,
+                &[
+                    (CAN_TXD, Side::Left),
+                    (CAN_RXD, Side::Left),
+                    (CAN_CANH, Side::Right),
+                    (CAN_CANL, Side::Right),
+                    (CAN_VCC, Side::Top),
+                    (CAN_GND, Side::Top),
+                ],
+            ),
+            (
+                DeviceKind::Matrix,
+                &[
+                    (MATRIX_DIN, Side::Left),
+                    (MATRIX_CLK, Side::Left),
+                    (MATRIX_CS, Side::Left),
+                    (MATRIX_DOUT, Side::Right),
+                    (MATRIX_VCC, Side::Top),
+                    (MATRIX_GND, Side::Top),
+                ],
+            ),
+        ];
+        for (kind, pins) in expected {
+            let table = kind.pins();
+            assert_eq!(table.len(), pins.len(), "{kind:?} pin table size");
+            for &(index, side) in pins {
+                assert_eq!(
+                    table[usize::from(index)].side,
+                    side,
+                    "{kind:?} pin {index} ({}) is on the wrong side",
+                    table[usize::from(index)].name
+                );
+            }
+        }
     }
 
     #[test]
@@ -1927,5 +2330,267 @@ mod tests {
         assert!(anode.x < device.rect().left());
         assert!(cathode.x > device.rect().right());
         assert_eq!(anode.y, cathode.y);
+    }
+
+    #[test]
+    fn supply_pins_are_appended_without_moving_the_signal_pins() {
+        // Published pin indices must never move: wires, tests and saved
+        // drawings all address pins by index.
+        assert_eq!(
+            (
+                UART_RX,
+                UART_TX,
+                UART_VCC,
+                UART_GND,
+                ENCODER_A,
+                ENCODER_B,
+                ENCODER_SW,
+                ENCODER_VCC,
+                ENCODER_GND
+            ),
+            (0, 1, 2, 3, 0, 1, 2, 3, 4)
+        );
+        assert_eq!(
+            (CAN_TXD, CAN_RXD, CAN_CANH, CAN_CANL, CAN_VCC, CAN_GND),
+            (0, 1, 2, 3, 4, 5)
+        );
+        assert_eq!(
+            (
+                MATRIX_DIN,
+                MATRIX_CLK,
+                MATRIX_CS,
+                MATRIX_DOUT,
+                MATRIX_VCC,
+                MATRIX_GND
+            ),
+            (0, 1, 2, 3, 4, 5)
+        );
+        for kind in [
+            DeviceKind::Uart,
+            DeviceKind::Encoder,
+            DeviceKind::Can,
+            DeviceKind::Matrix,
+        ] {
+            let (vcc, gnd) = kind.supply_pins().expect("part must have a supply");
+            assert_eq!(kind.pins()[vcc as usize].name, "VCC");
+            assert_eq!(kind.pins()[vcc as usize].role, PinRole::Vcc);
+            assert_eq!(kind.pins()[gnd as usize].name, "GND");
+            assert_eq!(kind.pins()[gnd as usize].role, PinRole::Ground);
+        }
+        for kind in [
+            DeviceKind::Led,
+            DeviceKind::Vcc,
+            DeviceKind::Gnd,
+            DeviceKind::Resistor,
+            DeviceKind::Scope,
+            DeviceKind::HseCrystal,
+            DeviceKind::LseCrystal,
+        ] {
+            assert_eq!(
+                kind.supply_pins(),
+                None,
+                "{} must not grow a supply",
+                kind.label()
+            );
+        }
+    }
+
+    #[test]
+    fn the_demo_board_powers_every_part_that_has_a_supply() {
+        let board = Board::demo();
+        let state = board.evaluate(&PinLevels::default());
+        for kind in [DeviceKind::Uart, DeviceKind::Encoder] {
+            let id = board.first_of(kind).expect("demo part").id;
+            assert_eq!(state.supply(id), Some(Supply::Powered), "{kind:?}");
+        }
+        // Parts without supply contacts report nothing at all.
+        for kind in [
+            DeviceKind::Led,
+            DeviceKind::HseCrystal,
+            DeviceKind::LseCrystal,
+        ] {
+            let id = board.first_of(kind).expect("demo part").id;
+            assert_eq!(state.supply(id), None, "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn an_open_supply_contact_is_reported_as_unwired() {
+        let mut board = Board::new();
+        let uart = board.add_uart(Pos2::new(0.0, 0.0));
+        let state = board.evaluate(&PinLevels::default());
+        assert_eq!(state.supply(uart), Some(Supply::Unwired));
+
+        // Only the `VCC` contact wired: still incomplete.
+        let vcc = board.add_vcc(Pos2::new(200.0, 0.0));
+        board.connect(
+            PinRef::Device {
+                device: vcc,
+                pin: POWER_PIN,
+            },
+            PinRef::Device {
+                device: uart,
+                pin: UART_VCC,
+            },
+        );
+        let state = board.evaluate(&PinLevels::default());
+        assert_eq!(state.supply(uart), Some(Supply::Unwired));
+
+        let gnd = board.add_gnd(Pos2::new(200.0, 100.0));
+        board.connect(
+            PinRef::Device {
+                device: gnd,
+                pin: POWER_PIN,
+            },
+            PinRef::Device {
+                device: uart,
+                pin: UART_GND,
+            },
+        );
+        let state = board.evaluate(&PinLevels::default());
+        assert_eq!(state.supply(uart), Some(Supply::Powered));
+    }
+
+    #[test]
+    fn a_supply_on_the_wrong_rail_is_a_fault() {
+        let mut board = Board::new();
+        let uart = board.add_uart(Pos2::new(0.0, 0.0));
+        let vcc = board.add_vcc(Pos2::new(200.0, 0.0));
+        let gnd = board.add_gnd(Pos2::new(200.0, 100.0));
+        // Crossed: `VCC` on the ground rail and `GND` on the supply rail.
+        board.connect(
+            PinRef::Device {
+                device: gnd,
+                pin: POWER_PIN,
+            },
+            PinRef::Device {
+                device: uart,
+                pin: UART_VCC,
+            },
+        );
+        board.connect(
+            PinRef::Device {
+                device: vcc,
+                pin: POWER_PIN,
+            },
+            PinRef::Device {
+                device: uart,
+                pin: UART_GND,
+            },
+        );
+        let state = board.evaluate(&PinLevels::default());
+        assert_eq!(state.supply(uart), Some(Supply::Fault));
+    }
+
+    #[test]
+    fn a_junction_taps_a_wire_without_breaking_its_net() {
+        let mut board = Board::new();
+        let led = board.add_led(Pos2::new(600.0, 120.0));
+        let mcu = PinRef::Mcu { port: 0, pin: 5 };
+        let anode = PinRef::Device {
+            device: led,
+            pin: 0,
+        };
+        board.connect(mcu, anode);
+        board.insert_bend(0, 0, Pos2::new(400.0, 80.0));
+
+        // Split between the corner and the LED, i.e. on the second leg.
+        let junction = board
+            .add_junction(0, 1, Pos2::new(500.0, 200.0))
+            .expect("the wire exists");
+        let tap = PinRef::Device {
+            device: junction,
+            pin: JUNCTION_PIN,
+        };
+        assert_eq!(
+            board.device(junction).map(|device| device.kind),
+            Some(DeviceKind::Junction)
+        );
+        assert_eq!(board.wires().len(), 2, "the wire became two halves");
+        assert_eq!(board.wires()[0].a, mcu);
+        assert_eq!(board.wires()[0].b, tap);
+        assert_eq!(board.wires()[0].bends, vec![Pos2::new(400.0, 80.0)]);
+        assert_eq!(board.wires()[1].a, tap);
+        assert_eq!(board.wires()[1].b, anode);
+        assert!(board.wires()[1].bends.is_empty());
+
+        // The tap does not break the net, and it is a terminal of its own.
+        assert!(board.same_net(mcu, anode));
+        assert_eq!(board.mcu_pin_for(anode), Some((0, 5)));
+        let gnd = board.add_gnd(Pos2::new(200.0, 300.0));
+        assert!(board.connect(
+            tap,
+            PinRef::Device {
+                device: gnd,
+                pin: POWER_PIN,
+            }
+        ));
+        let nets = board.nets();
+        assert_eq!(nets.len(), 1);
+        assert_eq!(nets[0].len(), 4, "both halves and the new wire share it");
+    }
+
+    #[test]
+    fn removing_a_junction_fuses_the_two_halves_back() {
+        let mut board = Board::new();
+        let led = board.add_led(Pos2::new(600.0, 120.0));
+        let mcu = PinRef::Mcu { port: 0, pin: 5 };
+        let anode = PinRef::Device {
+            device: led,
+            pin: 0,
+        };
+        board.connect(mcu, anode);
+        board.insert_bend(0, 0, Pos2::new(400.0, 80.0));
+        board.insert_bend(0, 1, Pos2::new(420.0, 200.0));
+        let junction = board
+            .add_junction(0, 1, Pos2::new(500.0, 200.0))
+            .expect("the wire exists");
+
+        board.remove_device(junction);
+        assert!(board.first_of(DeviceKind::Junction).is_none());
+        assert_eq!(board.wires().len(), 1, "the halves were fused back");
+        let wire = &board.wires()[0];
+        assert_eq!((wire.a, wire.b), (mcu, anode));
+        assert_eq!(
+            wire.bends,
+            vec![Pos2::new(400.0, 80.0), Pos2::new(420.0, 200.0)],
+            "the corners keep their order from `a` to `b`"
+        );
+        assert!(board.is_connected(mcu, anode));
+    }
+
+    #[test]
+    fn a_junction_can_only_split_a_leg_that_exists() {
+        let mut board = Board::new();
+        let led = board.add_led(Pos2::new(600.0, 120.0));
+        board.connect(
+            PinRef::Mcu { port: 0, pin: 5 },
+            PinRef::Device {
+                device: led,
+                pin: 0,
+            },
+        );
+        assert!(board.add_junction(0, 1, Pos2::new(10.0, 10.0)).is_none());
+        assert!(board.add_junction(9, 0, Pos2::new(10.0, 10.0)).is_none());
+        assert_eq!(board.wires().len(), 1);
+        assert!(board.first_of(DeviceKind::Junction).is_none());
+    }
+
+    #[test]
+    fn clearing_the_wires_takes_the_junctions_with_them() {
+        let mut board = Board::new();
+        let led = board.add_led(Pos2::new(600.0, 120.0));
+        board.connect(
+            PinRef::Mcu { port: 0, pin: 5 },
+            PinRef::Device {
+                device: led,
+                pin: 0,
+            },
+        );
+        board.add_junction(0, 0, Pos2::new(300.0, 100.0));
+        board.clear_wires();
+        assert!(board.wires().is_empty());
+        assert!(board.first_of(DeviceKind::Junction).is_none());
+        assert!(board.device(led).is_some(), "parts stay on the board");
     }
 }

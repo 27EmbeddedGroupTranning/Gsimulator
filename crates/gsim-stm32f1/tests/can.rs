@@ -164,6 +164,30 @@ fn loopback_frame_is_received_after_its_wire_time() {
 }
 
 #[test]
+fn a_mailbox_armed_while_the_wire_is_idle_still_starts() {
+    let mut soc = gsim_stm32f1::Soc::new();
+    let log = EventLog::new();
+    log.attach(&mut soc);
+    initialise(&mut soc, true);
+
+    // The wire has been idle for a long time before the firmware arms a
+    // mailbox; the frame must still start on the next idle bit instead of
+    // waiting for a dominant transition that will never come.
+    soc.advance_ns(5_000_000);
+    send(&mut soc, 0x123, b"late");
+    soc.advance_ns(2_000_000);
+
+    assert_eq!(soc.can.stats().loopback_frames, 1);
+    assert!(log.events().iter().any(|event| matches!(
+        event,
+        Event::CanFrame {
+            direction: CanDirection::Loopback,
+            frame,
+            ..
+        } if frame.bytes() == b"late"
+    )));
+}
+#[test]
 fn acceptance_filter_drops_frames_with_another_identifier() {
     let mut soc = gsim_stm32f1::Soc::new();
     initialise(&mut soc, true);

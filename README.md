@@ -29,35 +29,49 @@ ELF 解析来自 [object](https://github.com/gimli-rs/object)。
 
 ![Gsimulator 图形前端](docs/gui.png)
 
-*（上图是点「示例电路」后的接线；程序启动时画布是空的。）*
+*（上图是放置好器件并连线后的样子；新建工程默认只有一颗已接好的 HSE 晶振。）*
 
 ```powershell
-cargo run -p gsimulator-gui                     # 空画布启动：从器件库放置器件、连线
+cargo run -p gsimulator-gui                     # 新工程：自动摆好 HSE 晶振，其余从器件库放置
 cargo run -p gsimulator-gui -- path\to\app.elf  # 用真实固件的引脚输出驱动外设
 ```
 
 界面上可放置的器件全部来自工具栏 **＋ 添加器件** 打开的「器件库」窗口（分类 + 搜索，
 像嘉立创 EDA 的器件面板）：LED、UART 终端、旋转编码器、`VCC`/`GND` 电源符号、
-CAN 收发器、SPI 灯阵（MAX7219 8×8）、HSE/LSE 晶振。见下文“可放置的虚拟外设”。
+CAN 收发器、SPI 灯阵（MAX7219 8×8）、HSE/LSE 晶振、接线节点。见下文“可放置的虚拟外设”。
 
 界面用 [egui/eframe](https://github.com/emilk/egui)（纯 Rust 立即模式 GUI）实现，分成几块：
 
-* **画布**：中间是方形的 STM32F103C8T6 符号（左边 PA0–PA15、右边 PB0–PB15、底边 PC13–PC15、
-  顶边 PD0/PD1 = `OSC_IN`/`OSC_OUT`），每个引脚带电平指示；四周是放置上去的器件与电源符号。
+* **画布**：中间是方形的 STM32F103C8T6 符号，按 **LQFP48 真实引脚排列**绘制
+  （1–12 在左边自上而下、13–24 在底边自左向右、25–36 在右边自下而上、37–48 在顶边自右向左，
+  外侧标引脚号），其中 37 个信号脚（PA0–PA15 / PB0–PB15 / PC13–PC15 / PD0–PD1）可连线，
+  电源与复位脚（VBAT、VSS、VDD、VSSA、VDDA、NRST、BOOT0）按数据手册位置画出但不参与仿真；
+  每个信号脚带电平指示。
 * **器件库（＋ 添加器件）**：窗口按「电源 / 时钟 / 指示 / 通信 / 交互 / 显示」分类列出所有可放置的器件，
   带符号预览、引脚名和搜索框。点卡片上的「放置」后画布跟随鼠标显示半透明符号，
   单击落点即可放下（`Esc` 结束）；也可以直接把卡片拖到画布上。
   电源符号可以放任意多个，和器件一样能拖动、能 `Delete` 删除。
+  符号的引脚按**功能分区**排布：与 MCU 相连的信号（`RX`/`TX`/`A`/`B`/`SW`/`TXD`/`RXD`/`DIN`/`CLK`/`CS`…）在**左侧**，
+  总线与输出（`CANH`/`CANL`、`DOUT`、LED 的 `K`）在**右侧**，`VCC` 与 `GND` 都在**顶边**（`VCC` 靠左、`GND` 靠右）。
 * **接线（类似嘉立创 EDA / EasyEDA）**：点一个引脚 → 点另一个引脚 即完成一根连线；
   也可以从一个引脚按住拖到目标引脚。连线自动走**正交折线**，从引脚沿符号短桩出线，
   并且**绕开画布上所有器件的外形**（布线在 `crates/gsimulator-gui/src/route.rs`，
   先试直角/Z 形，拥挤时才走 A\*）；颜色跟随网络电平（绿=高、蓝=低、红=短路、暗=悬空）。
-  **自定义拐点**：选中连线后拖动线段即可拉出一个拐点，双击连线在点击处插入拐点，
-  拐点可以拖动（2 单位栅格吸附），选中拐点按 `Delete` 删掉它。
+  **自定义拐点**：选中连线后拖动线段即可拉出一个拐点，拐点可以拖动（2 单位栅格吸附），
+  选中拐点按 `Delete` 删掉它。
+  **接线节点（分支点）**：双击一根连线就在点击处插入一个节点，原来的一根线在那里分成两段，
+  节点本身是一个可点选的**接线端子**——点它就能再引一根线出去（例如从地线中间取一根到 LED 阴极），
+  画布上它显示成导线上的圆点；双击这个圆点即删除节点，两段线又并回一根。
   `Delete` 删除选中的连线或器件，中键拖动平移，滚轮缩放。
 * **状态面板**：仿真时间、实时倍率、指令数、中断/复位次数、总线访问与错误、完整时钟树
   （SYSCLK/HCLK/PCLK1/PCLK2/TIM2/ADC）、每个引脚的高低电平矩阵、虚拟外设列表（点亮状态 + 接线关系）、
   USART1 输出窗口。
+* **工程文件（💾 保存工程… / 📂 打开工程…，`Ctrl+S` / `Ctrl+O`）**：把整张原理图
+  （器件类型与位置、每根连线及其拐点、电阻阻值/终端串口号/CAN 模式/示波器时基等器件选项）
+  存成可读的 `.gsim` 文本文件，下次打开即原样恢复；文件是逐行 UTF-8 文本，
+  可以直接看 diff、也能手改（格式见下）。仓库自带一份示例工程
+  [`docs/example.gsim`](docs/example.gsim)（VCC/GND、LED/PA5、UART1、编码器、HSE/LSE 晶振），
+  用「📂 打开工程…」选它就能得到文档里的演示接线。
 
 驱动引脚的两个来源：
 
@@ -90,18 +104,43 @@ CAN 收发器、SPI 灯阵（MAX7219 8×8）、HSE/LSE 晶振。见下文“可�
 | 外设 | 引脚 | 行为 | 操作 |
 | --- | --- | --- | --- |
 | **LED** | `A`（阳） `K`（阴） | 纯消费端，按网络电平点亮 | — |
-| **UART 终端** | `RX` `TX` | 把 MCU 在所选 USART 上**真实移位输出**的字节显示成文本，并把输入的文本送进该 USART 的接收器 | 面板里选 USART1/2/3、输入后回车或点“发送”、“清空” |
-| **旋转编码器** | `A` `B` `SW` | 正交编码器（自带 10 k 上拉，接触点被主动驱动）：一个定位点 = 4 个四分之一相位（格雷码），每 2 ms 释放一个边沿；轴按下时把 `SW` 拉低 | 画布上**滚轮**转旋钮、**点击**按轴；也可用面板按钮 |
+| **UART 终端** | `RX` `TX` `VCC` `GND` | 把 MCU 在所选 USART 上**真实移位输出**的字节显示成文本，并把输入的文本送进该 USART 的接收器 | 面板里选 USART1/2/3、输入后回车或点“发送”、“清空” |
+| **旋转编码器** | `A` `B` `SW` `VCC` `GND` | 正交编码器（自带 10 k 上拉，接触点被主动驱动）：一个定位点 = 4 个四分之一相位（格雷码），每 2 ms 释放一个边沿；轴按下时把 `SW` 拉低 | 画布上**滚轮**转旋钮、**点击**按轴；也可用面板按钮 |
 | **VCC / GND 电源** | `+` / `-` | 电源符号：接到的整个网络被拉成高电平 / 低电平（`VCC` 和 `GND` 接到同一网络即短路告警） | 可放多个，拖动、`Delete` 删除；状态面板的「电源」按钮从第一个符号起线 |
-| **CAN 收发器** | `TXD` `RXD` `CANH` `CANL` | 物理层：`TXD` 的电平按位驱动总线对，`RXD` 回送总线（线与）采样到的电平；`CANH`/`CANL` 才是真正的两条线，要接到同一个网络的终端电阻与探头 | 画布显示模式与收发帧数；「CAN 总线」窗口可看帧、注入帧、切换模式、查看总线质量 |
+| **CAN 收发器** | `TXD` `RXD` `CANH` `CANL` `VCC` `GND` | 物理层：`TXD` 的电平按位驱动总线对，`RXD` 回送总线（线与）采样到的电平；`CANH`/`CANL` 才是真正的两条线，要接到同一个网络的终端电阻与探头 | 画布显示模式与收发帧数；「CAN 总线」窗口可看帧、注入帧、切换模式、查看总线质量 |
 | **电阻** | `1` `2` | 无源器件，本身不驱动任何东西：跨接在 `CANH`/`CANL` 上就是**终端电阻**，并联值决定总线质量（默认 120 Ω，可在面板改值） | 面板里改阻值；拆掉/减少终端电阻，总线会开始丢帧 |
 | **示波器** | `H` `L` | 两通道探头，`H` 接 `CANH`、`L` 接 `CANL` 后每个仿真位采样一次，画出两条线的电压与差分；振铃导致的翻转会用红色竖线标出 | 「📈 示波器」窗口：时基、档位、差分视图、冻结/清空 |
-| **SPI 灯阵** | `DIN` `CLK` `CS` `DOUT` | MAX7219 驱动的 8×8 点阵：按 SPI 时钟移位、`CS` 上升沿锁存一个 16 位字，`DOUT` 回送 16 位前的字节（供固件回读） | 画布上直接显示点阵画面；「外设浏览」里有寄存器细节与放大预览 |
+| **SPI 灯阵** | `DIN` `CLK` `CS` `DOUT` `VCC` `GND` | MAX7219 驱动的 8×8 点阵：按 SPI 时钟移位、`CS` 上升沿锁存一个 16 位字，`DOUT` 回送 16 位前的字节（供固件回读） | 画布上直接显示点阵画面；「外设浏览」里有寄存器细节与放大预览 |
 | **HSE 晶振** | `X1` `X2` | 8 MHz 高速晶体，接在 `OSC_IN`/`OSC_OUT`（PD0/PD1）。只有接好晶体、固件又置位 `HSEON`，`HSERDY` 才会在起振时间后置位；没接晶体时就像裸片一样永远等不到 ready | 放好后把 `X1`/`X2` 接到 PD0/PD1（无极性）。起振时 PD0/PD1 与连线按晶振频率真实翻转（采样到画布上就是闪烁），停止后自动释放 |
 | **LSE 晶振** | `X1` `X2` | 32.768 kHz 手表晶振，接在 `OSC32_IN`/`OSC32_OUT`（PC14/PC15），给 RTC 当时钟源；同样只有固件置位 `LSEON` 才起振 | 接到 PC14/PC15（无极性）。起振时 PC14/PC15 与连线同样真实翻转 |
+| **接线节点** | `T` | 导线上的分支点：**双击一根连线**就在点击处插入一个节点，那根线从此分成两段（两段都接到节点的 `T` 上，网络不变），所以可以把它当**接线端子**再引线出去；也可以从器件库直接放一个独立节点当汇流点 | 点节点（或从它拖出）继续连线；双击节点删除并让两段线并回一根；`Delete` 删除选中的节点 |
 
-画布**默认是空的**（没有默认电路、也没有默认激励）：需要什么器件就从「器件库」里放，
-工具栏的「示例电路」才会恢复 LED/UART/编码器/两颗晶振的演示接线。
+新建工程**默认只自动摆好 HSE 晶振**（已接到 PD0/PD1，MCU 起振就靠它），除此之外画布是空的、
+也没有默认激励；其他器件都从「器件库」里放。接好线后用「💾 保存工程…」把整张图纸存成 `.gsim`，
+下次「📂 打开工程…」即可原样恢复；
+想直接看文档里的演示接线，就打开仓库自带的 [`docs/example.gsim`](docs/example.gsim)。
+
+工程文件是逐行文本，第一行固定是 `gsimulator project 1`，之后每个器件一行、每根连线一行：
+
+```text
+gsimulator project 1
+device 1 vcc 430.00 110.00
+device 2 led 600.00 120.00
+device 3 resistor 700.00 300.00 ohms=120
+device 4 scope 760.00 420.00 window=20000 frozen=0
+wire mcu:0:5 dev:2:0
+wire dev:1:0 dev:2:1
+wire dev:3:0 dev:4:0 680.00,360.00 720.00,360.00
+```
+
+* `device <编号> <类型> <x> <y> [选项…]`：类型是 `led`/`uart`/`encoder`/`vcc`/`gnd`/`can`/
+  `matrix`/`hse`/`lse`/`resistor`/`scope`/`junction`；可选选项有 `ohms=`（电阻）、
+  `unit=`（终端监听哪个 USART）、`mode=normal|silent|standby`（CAN 收发器）、`window=`/`frozen=`（示波器）。
+* `wire <引脚> <引脚> [拐点…]`：引脚写成 `mcu:<端口>:<引脚>` 或 `dev:<编号>:<引脚>`，
+  拐点是板坐标里的 `x,y`；同一根线可以带任意多个拐点。
+  接线节点也是器件（`junction`），被它切开的导线存成两根都以 `dev:<编号>:0` 结尾的 `wire`。
+* 以 `#` 开头的整行是注释；器件按文件顺序重新放置，所以自动编号的名字（`LED1`、`UART2`…）与保存时一致。
+  解析失败会指出具体行号（如 `第 3 行：未知器件类型`），并保持当前图纸不变。
 
 **时钟源由固件 ELF 决定**：仿真只负责板上有哪些晶振（HSE/LSE 是否接着），
 固件自己的 RCC 配置决定用 HSI、HSE、PLL 还是 LSE/LSI（`SW`、`PLLSRC`、`RTCSEL`）。
@@ -110,6 +149,12 @@ CAN 收发器、SPI 灯阵（MAX7219 8×8）、HSE/LSE 晶振。见下文“可�
 
 接线规则（EDA 风格，模型在 `crates/gsim-devices/src/{uart,encoder,max7219,can_bus,crystal}.rs`）：
 
+* **供电（必须）**：UART 终端、旋转编码器、CAN 收发器、SPI 灯阵的符号上都有 `VCC` 与 `GND` 引脚（都在顶边），
+  用「器件库 → 电源」里的 `VCC`/`GND` 符号各接一根线（示例电路已经把终端与编码器接好）。
+  **没接电或接反的器件不工作**：终端不收也不发（输入的内容继续排队）、编码器不驱动任何引脚、
+  收发器不上总线、灯阵不吃 SPI 帧。状态面板的器件行显示「VCC/GND 已接 / 未接（不工作）/ 接错（不工作）」。
+  供电在每个仿真时间片重新判定（`bridge::service` 调用 `Board::supplies`），
+  所以运行中补上电源会立刻恢复工作，拆掉电源也会立刻停机。
 * **UART**：只有当终端的 `RX` 真的接在该 USART 的 `TX` 引脚（USART1=PA9、USART2=PA2、USART3=PB10）上时，
   才收得到字节；只有 `TX` 接在该 USART 的 `RX` 引脚（PA10 / PA3 / PB11）上时，输入的内容才会进 MCU。
   没接通时终端把字节排队，面板显示“N 字节待发送（等待连线）”。
@@ -445,8 +490,9 @@ cpu.pend_interrupt(gsim_core::irq::lines::EXTI0);  // 注入中断
 ```
 
 输入注入只通过这些“接线”接口：`gpio_set_input`、`usart_receive`、`spi_set_miso`、
-`adc_set_channel_mv`、`tim_set_channel_input`、`can_receive`。片外器件模型
-（`gsim-devices`）就是它们的驱动者：
+`adc_set_channel_mv`、`tim_set_channel_input`、`can_receive`；CAN 另有位级接口
+`can_set_on_bus` / `can_driven_level` / `can_sample_bit`（GUI 的桥与 CLI 的 demo 用它跑真实总线）。
+片外器件模型（`gsim-devices`）就是它们的驱动者：
 
 ```rust
 use gsim_devices::{CanBus, CanTransceiver, Max7219};
@@ -456,12 +502,28 @@ use std::rc::Rc;
 let matrix = Max7219::firmware_default();          // unit 0, CS = PA4, 1 片
 soc.borrow_mut().add_event_sink(Box::new(move |event| matrix.on_event(event)));
 
-// CAN 收发器挂在 CAN1 上，接一条可共享的虚拟总线。
+// CAN 收发器挂在 CAN1 上，接一条可共享的位级虚拟总线。
 let bus = Rc::new(RefCell::new(CanBus::new()));
+bus.borrow_mut().set_termination(Some(60.0));      // 两只 120 Ω 终端电阻的并联值
 let mut transceiver = CanTransceiver::attach(Rc::clone(&bus), "节点A", 0);
 while let Some(frame) = transceiver.poll() {
-    soc.borrow_mut().can_receive(0, frame);         // 总线 → 控制器 RRQ/FIFO
+    soc.borrow_mut().can_receive(0, frame);         // 帧级注入（测试/脚本用）
 }
+
+// 位级收发：总线一次推进一位，控制器逐位驱动与采样（GUI 的桥就是这样跑的）。
+soc.borrow_mut().can_set_on_bus(0, true);           // 由总线提供位时钟
+for _ in 0..200 {
+    let bit_ns = soc.borrow().can_bit_time_ns(0);
+    let now = soc.borrow().now_ns();
+    let level = bus.borrow_mut().step(soc.borrow().can_driven_level(0), now);
+    soc.borrow_mut().can_sample_bit(0, level);      // 线与结果回送给控制器
+    soc.borrow_mut().advance_ns(bit_ns);
+}
+
+// 一个不带控制器的节点（第二个 ECU / 注入面板）走同一套位机器。
+let rival = bus.borrow_mut().add_peer("对手节点");
+bus.borrow_mut()
+    .queue_frame(rival, gsim_core::CanFrame::standard(0x100, b"win"));
 ```
 
 ---
@@ -522,7 +584,7 @@ while let Some(frame) = transceiver.poll() {
   以及“内置激励 → 引脚 → 连线 → LED 点亮”“编码器 → MCU 引脚”
   “真实固件 → 虚拟终端”“终端输入 → USART 接收器”四条端到端链路。
 
-当前 336 个测试全部通过（GPU 离屏渲染、真实固件执行、真实 GDB 会话等测试在缺少
+当前 360 个测试全部通过（GPU 离屏渲染、真实固件执行、真实 GDB 会话等测试在缺少
 GPU / 交叉编译器 / `arm-none-eabi-gdb` 时会自动跳过）。
 
 ```powershell

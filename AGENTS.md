@@ -67,6 +67,8 @@ cargo run -p gsimulator-gui                  # 跑图形前端
    `PinRole` 现在有 `Positive / Negative / Rx / Tx / Phase / Button`，需要新语义就往里加。
    引脚顺序就是 `PinRef::Device { device, pin }` 的索引，**只能追加，不能改序**；
    多引脚器件用 `pub const XXX_PIN: u8` 常量引用（如 `UART_RX`、`ENCODER_A`）。
+   **引脚分区是约定**：所有接 MCU 的信号放 `Side::Left`，总线/输出（`CANH`/`CANL`、`DOUT`、LED 的 `K`）放 `Side::Right`，
+   `VCC` 与 `GND` 都放 `Side::Top`（数组里 `VCC` 在前，符号上就在左边）。`pins_are_grouped_by_electrical_role` 会校验这张表。
 3. 引脚在符号上的位置由 `Device::pin_pos` 自动沿边均匀分布，多引脚不必手工排布。
 4. 放置走统一的 `Board::add_device(kind, pos)`（`add_led`/`add_uart`/`add_encoder` 只是薄封装），
    名字前缀与强调色都在里面生成（`Device.accent`，LED 用它当灯色）。
@@ -77,6 +79,14 @@ cargo run -p gsimulator-gui                  # 跑图形前端
    运行时状态**不要**塞进 `Board` 的其他字段，也不要在 `evaluate` 里改它。
 6. 纯电气规则（LED 亮不亮、网络是否短路）写在 `Board::evaluate` + `BoardState` 里；
    需要时间推进或事件输入的器件（编码器、终端）**不要**写进 `evaluate`，交给 `bridge.rs`。
+7. 带电源的器件：在引脚表里补 `PinRole::Vcc` 和 `PinRole::Ground` 各一个 `PinDef`（都放顶边），
+   `DeviceKind::supply_pins()` 会自动认出它们。`bridge::service` 每片都用 `Board::supplies` 判定供电，
+   **`VCC`/`GND` 没接好（或接反）的器件不参加仿真**：不收事件、不驱动引脚、不上总线，
+   状态面板显示「未接（不工作）」。给带电源的器件写端到端测试时要先接电源
+   （参考 `crates/gsimulator-gui/tests/devices.rs` 的 `power()` 助手）。
+8. 存档（`.gsim`）：在 `crates/gsimulator-gui/src/project.rs` 的 `kind_token` 里给新器件一个稳定小写标记
+   （反查走 `DeviceKind::ALL`）；有需要保存的器件选项时同时扩展 `apply_option`（`key=value` 形式），
+   并在该文件的 `mod tests` 里补一条 round-trip 用例。
 
 ### 步骤 2：`crates/gsimulator-gui/src/canvas.rs` — 画符号
 

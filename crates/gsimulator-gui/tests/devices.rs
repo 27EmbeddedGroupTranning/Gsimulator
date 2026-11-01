@@ -7,11 +7,44 @@ use gsim_devices::Direction;
 use gsim_stm32f1::map;
 use gsimulator_gui::board::{
     Board, DeviceKind, PinRef, CAN_CANH, CAN_CANL, CAN_RXD, CAN_TXD, ENCODER_A, ENCODER_B,
-    ENCODER_SW, MATRIX_CLK, MATRIX_CS, MATRIX_DIN, MATRIX_DOUT, RESISTOR_A, RESISTOR_B, SCOPE_CANH,
-    SCOPE_CANL, UART_RX, UART_TX,
+    ENCODER_SW, JUNCTION_PIN, MATRIX_CLK, MATRIX_CS, MATRIX_DIN, MATRIX_DOUT, POWER_PIN,
+    RESISTOR_A, RESISTOR_B, SCOPE_CANH, SCOPE_CANL, UART_RX, UART_TX,
 };
 use gsimulator_gui::bridge::{self, USART_RX_PINS, USART_TX_PINS};
 use gsimulator_gui::sim::Simulation;
+
+/// Feeds a placed part from the two power symbols of the drawing, which is what
+/// makes it take part in the simulation at all.
+fn power(board: &mut Board, device: u32) {
+    let (vcc_pin, gnd_pin) = board
+        .device(device)
+        .expect("placed device")
+        .kind
+        .supply_pins()
+        .expect("part with a supply");
+    let vcc = board.add_vcc(egui::Pos2::new(0.0, 700.0));
+    let gnd = board.add_gnd(egui::Pos2::new(140.0, 700.0));
+    board.connect(
+        PinRef::Device {
+            device: vcc,
+            pin: POWER_PIN,
+        },
+        PinRef::Device {
+            device,
+            pin: vcc_pin,
+        },
+    );
+    board.connect(
+        PinRef::Device {
+            device: gnd,
+            pin: POWER_PIN,
+        },
+        PinRef::Device {
+            device,
+            pin: gnd_pin,
+        },
+    );
+}
 
 fn encoder_board(port: u8, a: u8, b: u8, sw: u8) -> (Board, u32) {
     let mut board = Board::new();
@@ -25,6 +58,7 @@ fn encoder_board(port: u8, a: u8, b: u8, sw: u8) -> (Board, u32) {
             PinRef::Mcu { port, pin: mcu },
         );
     }
+    power(&mut board, encoder);
     (board, encoder)
 }
 
@@ -121,6 +155,8 @@ fn turning_the_knob_drives_the_wired_pins_of_the_running_simulation() {
 fn an_unwired_encoder_does_not_touch_any_pin() {
     let mut board = Board::new();
     let encoder = board.add_encoder(egui::Pos2::new(0.0, 0.0));
+    // Powered but with none of its contacts wired to the controller.
+    power(&mut board, encoder);
     let mut sim = Simulation::new();
 
     let now = sim.now_ns();
@@ -129,6 +165,34 @@ fn an_unwired_encoder_does_not_touch_any_pin() {
 
     let levels = sim.pin_levels();
     assert!(!levels.level_of(0, 0) && !levels.level_of(0, 1));
+}
+
+#[test]
+fn an_unpowered_encoder_leaves_the_pins_alone() {
+    let mut board = Board::new();
+    let encoder = board.add_encoder(egui::Pos2::new(0.0, 0.0));
+    for (pin, mcu) in [(ENCODER_A, 0u8), (ENCODER_B, 1), (ENCODER_SW, 2)] {
+        board.connect(
+            PinRef::Device {
+                device: encoder,
+                pin,
+            },
+            PinRef::Mcu { port: 0, pin: mcu },
+        );
+    }
+    let mut sim = Simulation::new();
+
+    encoder_mut(&mut board, encoder).rotate(Direction::Clockwise, 2, sim.now_ns());
+    bridge::run_frame(&mut board, &mut sim, 40_000, 1_000_000);
+
+    let levels = sim.pin_levels();
+    for pin in 0..3u8 {
+        assert!(
+            !levels.level_of(0, pin),
+            "P{}{pin} must stay untouched while the part has no supply",
+            0
+        );
+    }
 }
 
 #[test]
@@ -159,6 +223,7 @@ fn the_button_pulls_the_wired_pin_low_while_pressed() {
 fn a_terminal_wired_to_the_port_hears_what_the_controller_sends() {
     let mut board = Board::new();
     let uart = board.add_uart(egui::Pos2::new(500.0, 100.0));
+    power(&mut board, uart);
     let (tx_port, tx_pin) = USART_TX_PINS[0];
     board.connect(
         PinRef::Mcu {
@@ -184,9 +249,66 @@ fn a_terminal_wired_to_the_port_hears_what_the_controller_sends() {
 }
 
 #[test]
+fn a_junction_tapped_into_the_wire_keeps_the_terminal_talking() {
+    let mut board = Board::new();
+    let uart = board.add_uart(egui::Pos2::new(500.0, 100.0));
+    power(&mut board, uart);
+    let (tx_port, tx_pin) = USART_TX_PINS[0];
+    board.connect(
+        PinRef::Mcu {
+            port: tx_port,
+            pin: tx_pin,
+        },
+        PinRef::Device {
+            device: uart,
+            pin: UART_RX,
+        },
+    );
+    // Double clicking that wire splits it in two, both ending on the tap.
+    let index = board
+        .wires()
+        .iter()
+        .position(|wire| {
+            wire.a
+                == PinRef::Mcu {
+                    port: tx_port,
+                    pin: tx_pin,
+                }
+                || wire.b
+                    == PinRef::Mcu {
+                        port: tx_port,
+                        pin: tx_pin,
+                    }
+        })
+        .expect("the TX wire exists");
+    let junction = board
+        .add_junction(index, 0, egui::Pos2::new(400.0, 90.0))
+        .expect("the wire exists");
+    let tap = PinRef::Device {
+        device: junction,
+        pin: JUNCTION_PIN,
+    };
+    // The tap really is a terminal: branch a wire from it to a spare pin.
+    assert!(board.connect(tap, PinRef::Mcu { port: 0, pin: 0 }));
+
+    let mut sim = Simulation::new();
+    open_usart1(&mut sim);
+    transmit(&mut sim, b'O');
+    bridge::run_frame(&mut board, &mut sim, 40_000, 1_000_000);
+
+    assert_eq!(
+        uart_terminal(&board, uart).rx_text(),
+        "O",
+        "tapping the wire must not stop the terminal from hearing USART1"
+    );
+}
+
+#[test]
 fn an_unwired_terminal_hears_nothing() {
     let mut board = Board::new();
     let uart = board.add_uart(egui::Pos2::new(500.0, 100.0));
+    // Powered, but its `RX` contact is not wired to the port.
+    power(&mut board, uart);
     let mut sim = Simulation::new();
     open_usart1(&mut sim);
 
@@ -197,9 +319,42 @@ fn an_unwired_terminal_hears_nothing() {
 }
 
 #[test]
+fn a_terminal_only_works_once_its_supply_is_on_the_rails() {
+    let mut board = Board::new();
+    let uart = board.add_uart(egui::Pos2::new(500.0, 100.0));
+    let (tx_port, tx_pin) = USART_TX_PINS[0];
+    board.connect(
+        PinRef::Mcu {
+            port: tx_port,
+            pin: tx_pin,
+        },
+        PinRef::Device {
+            device: uart,
+            pin: UART_RX,
+        },
+    );
+    let mut sim = Simulation::new();
+    open_usart1(&mut sim);
+
+    transmit(&mut sim, b'A');
+    bridge::run_frame(&mut board, &mut sim, 40_000, 1_000_000);
+    assert_eq!(
+        uart_terminal(&board, uart).rx_bytes(),
+        0,
+        "a terminal without a supply must not hear the port"
+    );
+
+    power(&mut board, uart);
+    transmit(&mut sim, b'B');
+    bridge::run_frame(&mut board, &mut sim, 40_000, 1_000_000);
+    assert_eq!(uart_terminal(&board, uart).rx_text(), "B");
+}
+
+#[test]
 fn bytes_typed_into_a_wired_terminal_reach_the_controller_receiver() {
     let mut board = Board::new();
     let uart = board.add_uart(egui::Pos2::new(500.0, 100.0));
+    power(&mut board, uart);
     let (rx_port, rx_pin) = USART_RX_PINS[0];
     board.connect(
         PinRef::Device {
@@ -237,6 +392,7 @@ fn bytes_typed_into_a_wired_terminal_reach_the_controller_receiver() {
 fn a_terminal_keeps_its_bytes_while_the_receiver_is_closed() {
     let mut board = Board::new();
     let uart = board.add_uart(egui::Pos2::new(500.0, 100.0));
+    power(&mut board, uart);
     let (rx_port, rx_pin) = USART_RX_PINS[0];
     board.connect(
         PinRef::Device {
@@ -341,6 +497,7 @@ fn write_soc(sim: &mut Simulation, address: u32, value: u32) {
 fn a_matrix_wired_to_spi1_latches_the_words_the_controller_shifts_out() {
     let mut board = Board::new();
     let matrix = board.add_matrix(egui::Pos2::new(500.0, 200.0));
+    power(&mut board, matrix);
     for (pin, (port, mcu)) in [
         (MATRIX_DIN, (0u8, 7u8)),
         (MATRIX_CLK, (0, 5)),
@@ -392,7 +549,8 @@ fn a_matrix_wired_to_spi1_latches_the_words_the_controller_shifts_out() {
 fn an_unwired_matrix_hears_nothing_from_the_spi_port() {
     let mut board = Board::new();
     let matrix = board.add_matrix(egui::Pos2::new(500.0, 200.0));
-    // Only the clock is wired: without DIN the chain must stay silent.
+    power(&mut board, matrix);
+    // Powered, but only the clock is wired: without DIN the chain stays silent.
     board.connect(
         PinRef::Device {
             device: matrix,
@@ -419,6 +577,53 @@ fn an_unwired_matrix_hears_nothing_from_the_spi_port() {
         .expect("matrix model");
     assert_eq!(handle.borrow().frames(), 0);
 }
+
+#[test]
+fn an_unpowered_matrix_ignores_the_spi_port() {
+    let mut board = Board::new();
+    let matrix = board.add_matrix(egui::Pos2::new(500.0, 200.0));
+    // Fully wired to SPI1, but with no supply at all.
+    for (pin, (port, mcu)) in [
+        (MATRIX_DIN, (0u8, 7u8)),
+        (MATRIX_CLK, (0, 5)),
+        (MATRIX_CS, (0, 4)),
+        (MATRIX_DOUT, (0, 6)),
+    ] {
+        board.connect(
+            PinRef::Device {
+                device: matrix,
+                pin,
+            },
+            PinRef::Mcu { port, pin: mcu },
+        );
+    }
+
+    let mut sim = Simulation::new();
+    sim.stop_stimulus();
+    open_spi1(&mut sim);
+    let gpioa = map::gpio::PORTS[0];
+    write_soc(&mut sim, gpioa + map::gpio::BSRR, 1 << (4 + 16));
+    for byte in [0x0Au8, 0x05] {
+        bridge::service(&mut board, &mut sim);
+        write_soc(&mut sim, map::spi::BASE_1 + map::spi::DR, u32::from(byte));
+        for _ in 0..8 {
+            sim.step_once(2_000);
+            bridge::service(&mut board, &mut sim);
+        }
+    }
+    write_soc(&mut sim, gpioa + map::gpio::BSRR, 1 << 4);
+    bridge::service(&mut board, &mut sim);
+
+    let handle = board
+        .device(matrix)
+        .expect("matrix device")
+        .hardware
+        .matrix()
+        .cloned()
+        .expect("matrix model");
+    assert_eq!(handle.borrow().frames(), 0, "no supply, no frames");
+}
+
 /// `CAN1` base address, as the firmware sees it.
 const CAN: u32 = map::can::BASE_1;
 
@@ -429,6 +634,7 @@ const CAN: u32 = map::can::BASE_1;
 fn can_board() -> (Board, u32) {
     let mut board = Board::new();
     let transceiver = board.add_can(egui::Pos2::new(520.0, 180.0));
+    power(&mut board, transceiver);
     board.connect(
         PinRef::Device {
             device: transceiver,
@@ -545,6 +751,65 @@ fn a_resistor_across_the_pair_sets_the_bus_quality() {
     let open = board.can_network();
     assert!(open.termination_ohm.is_none());
     assert!(open.quality() < 0.1);
+}
+
+#[test]
+fn an_unpowered_transceiver_keeps_the_controller_off_the_bus() {
+    let mut board = Board::new();
+    let transceiver = board.add_can(egui::Pos2::new(520.0, 180.0));
+    board.connect(
+        PinRef::Device {
+            device: transceiver,
+            pin: CAN_TXD,
+        },
+        PinRef::Mcu { port: 0, pin: 12 },
+    );
+    board.connect(
+        PinRef::Device {
+            device: transceiver,
+            pin: CAN_RXD,
+        },
+        PinRef::Mcu { port: 0, pin: 11 },
+    );
+    // A terminated pair, but the transceiver itself has no supply.
+    let resistor = board.add_resistor(egui::Pos2::new(360.0, 320.0));
+    board.connect(
+        PinRef::Device {
+            device: transceiver,
+            pin: CAN_CANH,
+        },
+        PinRef::Device {
+            device: resistor,
+            pin: RESISTOR_A,
+        },
+    );
+    board.connect(
+        PinRef::Device {
+            device: transceiver,
+            pin: CAN_CANL,
+        },
+        PinRef::Device {
+            device: resistor,
+            pin: RESISTOR_B,
+        },
+    );
+
+    let mut sim = Simulation::new();
+    sim.stop_stimulus();
+    open_can1(&mut sim);
+    sim.set_running(true);
+
+    board
+        .can_bus()
+        .borrow_mut()
+        .inject_bit_frame(gsim_core::CanFrame::standard(0x321, b"GSIM"), sim.now_ns());
+    run(&mut board, &mut sim, 6);
+
+    assert_eq!(
+        sim.with_soc(|soc| soc.can.rx_frames(0).len()),
+        0,
+        "an unpowered transceiver must not put the controller on the wire"
+    );
 }
 
 #[test]
