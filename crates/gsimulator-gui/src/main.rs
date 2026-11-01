@@ -77,7 +77,7 @@ fn main() -> eframe::Result<()> {
             .with_inner_size([1200.0, 760.0])
             .with_min_inner_size([640.0, 420.0])
             .with_maximized(true)
-            .with_title("Gsimulator · STM32F103 仿真前端"),
+            .with_title("Gsimulator STM32仿真"),
         ..Default::default()
     };
 

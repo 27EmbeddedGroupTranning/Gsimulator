@@ -3,3 +3,4 @@
 **/*.bin
 **/*.hex
 Cargo.lock.bak
+AGENTS.md
