@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 use eframe::egui;
 use gsim_cpu::ElfImage;
 use gsim_gdb::rsp;
+use gsimulator_gui::app::App;
 use gsimulator_gui::debugger::{DebugService, DebugWindow};
 use gsimulator_gui::sim::Simulation;
 
@@ -144,13 +145,18 @@ fn a_breakpoint_stops_the_simulation_the_canvas_draws() {
     assert_eq!(bench.sim.now_ns(), clock, "a halted core still ran");
 
     // A breakpoint on `main`, then continue: the debugger's own code runs the
-    // firmware, and the stop reply has to name the breakpoint.
+    // firmware, and the very next packet has to be the stop reply. A stray
+    // `OK` here is what makes some GDB versions log a packet error.
     assert_eq!(bench.request(&format!("Z1,{main:x},2")), "OK");
-    assert_eq!(bench.request("c"), "OK");
+    bench.send("c");
 
     let deadline = Instant::now() + Duration::from_secs(20);
     let stop = loop {
         let reply = bench.expect();
+        assert!(
+            reply.starts_with("T0"),
+            "continue answered with `{reply}` instead of a stop reply"
+        );
         if reply.starts_with("T05") {
             break reply;
         }
@@ -313,4 +319,260 @@ fn the_debug_window_renders_and_opens_the_port() {
     assert_eq!(service.peer(), None);
     service.stop(&mut sim);
     assert!(!service.is_listening());
+}
+
+/// `QStartNoAckMode` only lasts for one connection. A second debugger has to
+/// see acknowledgements again, or GDB receives its reply where it expected the
+/// `+` ack and logs "Packet instead of Ack, ignoring it" until it times out.
+#[test]
+fn the_second_session_gets_acknowledgements_again() {
+    let mut sim = Simulation::new();
+    let mut service = DebugService::new();
+    service.start(0).expect("an ephemeral port is bound");
+
+    // First session: the debugger turns acknowledgements off.
+    {
+        let mut first = TcpStream::connect(("127.0.0.1", service.port())).expect("connect");
+        first
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("a read timeout");
+        serve_until_reply(&mut service, &mut sim, &mut first, "QStartNoAckMode");
+        drop(first);
+        // Let the service notice the disconnect.
+        for _ in 0..20 {
+            service.poll(&mut sim);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    // Second session: the raw bytes must be `+` (ack of our request) then the
+    // reply packet.
+    let mut second = TcpStream::connect(("127.0.0.1", service.port())).expect("connect");
+    second
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("a read timeout");
+    second.write_all(&rsp::encode("qSupported")).expect("write");
+    let mut raw = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while raw.len() < 3 && Instant::now() < deadline {
+        service.poll(&mut sim);
+        let mut chunk = [0u8; 256];
+        match second.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(read) => raw.extend_from_slice(&chunk[..read]),
+            Err(error)
+                if error.kind() == std::io::ErrorKind::WouldBlock
+                    || error.kind() == std::io::ErrorKind::TimedOut => {}
+            Err(error) => panic!("read failed: {error}"),
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(
+        raw.first(),
+        Some(&b'+'),
+        "the second session must be acknowledged: {:?}",
+        String::from_utf8_lossy(&raw)
+    );
+    assert_eq!(raw.get(1), Some(&b'$'), "then the reply packet follows");
+}
+
+/// Sends one request, serving frames until a packet comes back.
+fn serve_until_reply(
+    service: &mut DebugService,
+    sim: &mut Simulation,
+    client: &mut TcpStream,
+    request: &str,
+) -> String {
+    client
+        .write_all(&rsp::encode(request))
+        .expect("the request is written");
+    let mut buffer = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        service.poll(sim);
+        let mut chunk = [0u8; 1024];
+        match client.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(read) => buffer.extend_from_slice(&chunk[..read]),
+            Err(error)
+                if error.kind() == std::io::ErrorKind::WouldBlock
+                    || error.kind() == std::io::ErrorKind::TimedOut => {}
+            Err(error) => panic!("read failed: {error}"),
+        }
+        if let rsp::Frame::Packet(payload) = rsp::next_frame(&mut buffer) {
+            return String::from_utf8_lossy(&payload).to_string();
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    panic!("no reply to `{request}`");
+}
+
+/// A debugger that attaches before any firmware is loaded must still get an
+/// answer for `continue`, otherwise GDB hangs waiting for a stop reply.
+#[test]
+fn continuing_without_a_firmware_answers_instead_of_hanging() {
+    let mut sim = Simulation::new();
+    let mut service = DebugService::new();
+    service.start(0).expect("an ephemeral port is bound");
+    let mut client = TcpStream::connect(("127.0.0.1", service.port())).expect("connect");
+    client
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("a read timeout");
+
+    client.write_all(&rsp::encode("?")).expect("write");
+    let mut buffer = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut replies = Vec::new();
+    while replies.len() < 2 && Instant::now() < deadline {
+        service.poll(&mut sim);
+        let mut chunk = [0u8; 1024];
+        match client.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(read) => buffer.extend_from_slice(&chunk[..read]),
+            Err(error)
+                if error.kind() == std::io::ErrorKind::WouldBlock
+                    || error.kind() == std::io::ErrorKind::TimedOut => {}
+            Err(error) => panic!("read failed: {error}"),
+        }
+        while let rsp::Frame::Packet(payload) = rsp::next_frame(&mut buffer) {
+            replies.push(String::from_utf8_lossy(&payload).to_string());
+            if replies.len() == 1 {
+                client.write_all(&rsp::encode("c")).expect("write");
+            }
+        }
+    }
+
+    assert!(replies[0].starts_with("T0"), "{:?}", replies[0]);
+    assert!(
+        replies[1].starts_with("T0"),
+        "continue must answer with a stop reply, got {:?}",
+        replies[1]
+    );
+    assert!(sim.debug_hold(), "the core must stay halted");
+}
+
+/// The debugger is only served from the frame loop, so a paused window has to
+/// keep drawing. Without this the socket is never polled, GDB times out and
+/// reports "Ignoring packet error, continuing...".
+#[test]
+fn a_paused_window_keeps_the_debugger_served() {
+    let ctx = egui::Context::default();
+    let mut app = App::with_context(&ctx, None);
+    assert!(
+        !app.debug_window_mut().needs_frames(),
+        "the service starts off"
+    );
+
+    // A running simulation repaints by itself, so the window is paused first
+    // with the space bar - that is when the frame loop would otherwise stop.
+    let mut seconds = 0.0f64;
+    let mut frame = |app: &mut App, space: bool| {
+        seconds += 1.0 / 60.0;
+        let events = if space {
+            vec![egui::Event::Key {
+                key: egui::Key::Space,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::default(),
+            }]
+        } else {
+            Vec::new()
+        };
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::Vec2::new(1280.0, 800.0),
+            )),
+            time: Some(seconds),
+            events,
+            ..Default::default()
+        };
+        let _ = ctx.run(input, |ctx| app.draw(ctx));
+        ctx.has_requested_repaint()
+    };
+
+    // Pause the simulation: from now on nothing animates on its own, so the
+    // window only redraws when the user does something.
+    let _ = frame(&mut app, true);
+    let now = app.sim_time_ns();
+    let mut idle = 0;
+    for _ in 0..60 {
+        if frame(&mut app, false) {
+            idle += 1;
+        }
+    }
+    assert!(idle < 10, "a paused window should idle, {idle}/60 repaints");
+    assert_eq!(app.sim_time_ns(), now, "the paused clock moved");
+
+    // With the debugger listening the same paused window has to keep drawing,
+    // otherwise the socket is never polled and GDB times out.
+    app.debug_window_mut()
+        .start(0)
+        .expect("an ephemeral port is bound");
+    assert!(app.debug_window_mut().needs_frames());
+    let mut repaints = 0;
+    for _ in 0..60 {
+        if frame(&mut app, false) {
+            repaints += 1;
+        }
+    }
+    assert_eq!(
+        repaints, 60,
+        "the window stopped repainting while the debugger was listening"
+    );
+    assert_eq!(app.sim_time_ns(), now, "the paused clock moved");
+}
+
+/// VS Code opens a fresh connection per session while the previous socket is
+/// often still open. A stale client must never keep the new one unanswered -
+/// that is exactly what GDB reports as "Ignoring packet error".
+#[test]
+fn a_new_debugger_replaces_a_stale_connection() {
+    let mut sim = Simulation::new();
+    let mut service = DebugService::new();
+    service.start(0).expect("an ephemeral port is bound");
+    let port = service.port();
+
+    let stale = std::net::TcpStream::connect(("127.0.0.1", port)).expect("first client");
+    // Let the service accept the first socket, then leave it completely idle.
+    std::thread::sleep(Duration::from_millis(50));
+    service.poll(&mut sim);
+    assert!(service.is_attached(), "the first client is served");
+
+    // A second debugger connects while the first one is still open.
+    let mut fresh = std::net::TcpStream::connect(("127.0.0.1", port)).expect("second client");
+    fresh
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .expect("a read timeout");
+
+    // Asking for the target state must be answered for the *new* client.
+    fresh
+        .write_all(&rsp::encode("?"))
+        .expect("the request is written");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut buffer = Vec::new();
+    let mut reply = None;
+    while reply.is_none() && Instant::now() < deadline {
+        service.poll(&mut sim);
+        let mut chunk = [0u8; 1024];
+        match fresh.read(&mut chunk) {
+            Ok(0) => panic!("the service closed the new connection"),
+            Ok(read) => buffer.extend_from_slice(&chunk[..read]),
+            Err(error)
+                if error.kind() == std::io::ErrorKind::WouldBlock
+                    || error.kind() == std::io::ErrorKind::TimedOut => {}
+            Err(error) => panic!("read failed: {error}"),
+        }
+        if let rsp::Frame::Packet(payload) = rsp::next_frame(&mut buffer) {
+            reply = Some(String::from_utf8_lossy(&payload).to_string());
+        }
+    }
+    let reply = reply.expect("the new debugger was never answered");
+    assert!(reply.starts_with("T0"), "{reply}");
+    assert!(
+        service.log().count() > 0,
+        "the exchange is recorded for the window"
+    );
+    drop(stale);
 }

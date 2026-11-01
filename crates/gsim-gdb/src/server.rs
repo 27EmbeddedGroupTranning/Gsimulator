@@ -96,6 +96,16 @@ impl GdbServer {
         self.acknowledge
     }
 
+    /// Starts a fresh session: acknowledgements are on again.
+    ///
+    /// `QStartNoAckMode` only lasts as long as one debugger connection; a new
+    /// client that keeps the old state would never get its `+` acks, and GDB
+    /// then logs "Packet instead of Ack, ignoring it" and retries until it
+    /// times out.
+    pub fn begin_session(&mut self) {
+        self.acknowledge = true;
+    }
+
     /// Binds the listening socket described by `options`.
     pub fn bind(options: ServerOptions) -> io::Result<(TcpListener, Self)> {
         let listener = TcpListener::bind(options.bind)?;
@@ -142,6 +152,8 @@ impl GdbServer {
     }
 
     fn session(&mut self, connection: &mut Connection, target: &mut Target) -> io::Result<()> {
+        self.begin_session();
+        connection.set_acknowledge(true);
         target.attach();
         self.note(&format!("attached: core halted at 0x{:08X}", target.pc()));
         loop {

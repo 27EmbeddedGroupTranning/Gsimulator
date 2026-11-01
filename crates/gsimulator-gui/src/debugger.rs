@@ -25,7 +25,7 @@ use gsim_gdb::{
 use gsim_stm32f1::map;
 use gsim_stm32f1::Memory;
 
-use crate::sim::Simulation;
+use crate::sim::{Simulation, Source};
 
 /// Default port; it is the one OpenOCD and `gsimulator gdb` use as well.
 pub const DEFAULT_PORT: u16 = 3333;
@@ -363,7 +363,12 @@ pub struct DebugService {
     /// Addresses armed by the debugger, with the kind GDB asked for.
     breakpoints: Vec<(u32, bool)>,
     error: Option<String>,
+    /// Last packet exchanges, newest last, for the window's log.
+    log: std::collections::VecDeque<String>,
 }
+
+/// Entries kept in the packet log.
+const LOG_LINES: usize = 60;
 
 impl Default for DebugService {
     fn default() -> Self {
@@ -388,7 +393,26 @@ impl DebugService {
             running: false,
             breakpoints: Vec::new(),
             error: None,
+            log: std::collections::VecDeque::new(),
         }
+    }
+
+    /// Appends one line to the packet log shown in the window.
+    fn record(&mut self, line: String) {
+        if self.log.len() >= LOG_LINES {
+            self.log.pop_front();
+        }
+        self.log.push_back(line);
+    }
+
+    /// Packet log, oldest first.
+    pub fn log(&self) -> impl Iterator<Item = &str> {
+        self.log.iter().map(String::as_str)
+    }
+
+    /// `true` while the debugger needs this frame loop to stay alive.
+    pub fn needs_frames(&self) -> bool {
+        self.listener.is_some() || self.connection.is_some()
     }
 
     pub fn is_listening(&self) -> bool {
@@ -454,10 +478,7 @@ impl DebugService {
     /// Returns `true` when the debugger changed the run state, so the front end
     /// can refresh its widgets.
     pub fn poll(&mut self, sim: &mut Simulation) -> bool {
-        let mut changed = false;
-        if self.connection.is_none() {
-            changed |= self.accept(sim);
-        }
+        let mut changed = self.accept_clients(sim);
 
         let mut keep = true;
         if let Some(mut link) = self.connection.take() {
@@ -502,50 +523,68 @@ impl DebugService {
         changed
     }
 
-    /// Takes the waiting client, if any.
-    fn accept(&mut self, sim: &mut Simulation) -> bool {
-        let Some(listener) = self.listener.as_ref() else {
-            return false;
-        };
-        match listener.accept() {
-            Ok((stream, peer)) => match Connection::new(stream) {
-                Ok(mut connection) => {
-                    // The UI thread serves this socket, so it must never block:
-                    // a stalled debugger fails the write instead of freezing.
-                    if let Err(error) = connection.set_non_blocking(true) {
-                        self.error = Some(format!("无法设置非阻塞连接：{error}"));
-                        return false;
+    /// Takes every waiting client, replacing the one currently attached.
+    ///
+    /// VS Code (Cortex-Debug) opens a fresh connection for each session and the
+    /// previous socket is often still open. Keeping it would leave the new
+    /// debugger unanswered - GDB then reports "Ignoring packet error" after its
+    /// first timeout - so the newest client always wins.
+    fn accept_clients(&mut self, sim: &mut Simulation) -> bool {
+        let mut changed = false;
+        loop {
+            let Some(listener) = self.listener.as_ref() else {
+                return changed;
+            };
+            match listener.accept() {
+                Ok((stream, peer)) => {
+                    changed = true;
+                    match Connection::new(stream) {
+                        Ok(mut connection) => {
+                            // The UI thread serves this socket, so it must never
+                            // block: a stalled debugger fails the write instead
+                            // of freezing the window.
+                            if let Err(error) = connection.set_non_blocking(true) {
+                                self.error = Some(format!("无法设置非阻塞连接：{error}"));
+                                continue;
+                            }
+                            if self.connection.is_some() {
+                                self.record(format!("{peer} 取代了上一个调试器连接"));
+                                self.release(sim);
+                            } else {
+                                self.record(format!("{peer} 已连接"));
+                            }
+                            // A new session always starts with acknowledgements
+                            // on: `QStartNoAckMode` from the previous debugger
+                            // must not leak into this connection.
+                            self.server.begin_session();
+                            self.connection = Some(connection);
+                            self.peer = Some(peer);
+                            self.running = false;
+                            self.error = None;
+                            let mut target = CoreTarget {
+                                sim,
+                                breakpoints: &mut self.breakpoints,
+                            };
+                            target.attach();
+                        }
+                        Err(error) => {
+                            self.error = Some(format!("连接 {peer} 失败：{error}"));
+                        }
                     }
-                    self.connection = Some(connection);
-                    self.peer = Some(peer);
-                    self.running = false;
-                    self.error = None;
-                    let mut target = CoreTarget {
-                        sim,
-                        breakpoints: &mut self.breakpoints,
-                    };
-                    target.attach();
-                    true
                 }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => return changed,
                 Err(error) => {
-                    self.error = Some(format!("连接 {peer} 失败：{error}"));
-                    false
+                    self.error = Some(format!("监听失败：{error}"));
+                    self.listener = None;
+                    return changed;
                 }
-            },
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => false,
-            Err(error) => {
-                self.error = Some(format!("监听失败：{error}"));
-                self.listener = None;
-                false
             }
         }
     }
 
     /// Serves one packet; `false` closes the connection.
     fn serve(&mut self, link: &mut Connection, payload: &[u8], sim: &mut Simulation) -> bool {
-        if std::env::var_os("GSIM_DEBUG_PACKETS").is_some() {
-            eprintln!("[gui-st-link] <- {}", String::from_utf8_lossy(payload));
-        }
+        let request = packet_summary(payload);
         let reply = {
             let mut target = CoreTarget {
                 sim,
@@ -554,8 +593,9 @@ impl DebugService {
             self.server.dispatch(&mut target, payload)
         };
         link.set_acknowledge(self.server.acknowledge());
+        self.record(format!("← {request}  → {}", reply_label(&reply)));
         if std::env::var_os("GSIM_DEBUG_PACKETS").is_some() {
-            eprintln!("[gui-st-link] -> {}", reply_label(&reply));
+            eprintln!("[gui-st-link] <- {request} -> {}", reply_label(&reply));
         }
 
         match reply {
@@ -578,11 +618,20 @@ impl DebugService {
                 false
             }
             Reply::Resume => {
-                // The stop reply follows when the firmware stops; the canvas
-                // keeps animating in the meantime.
+                // No acknowledgement here: like a real probe, the very next
+                // packet on the wire is the stop reply. Sending `OK` first
+                // makes some GDB versions report "Ignoring packet error".
                 sim.debug_resume();
+                if sim.debug_hold() {
+                    // Nothing to run (no firmware loaded): answer straight away,
+                    // a debugger that waits for a reply would hang forever.
+                    self.running = false;
+                    return link
+                        .send(&self.server.stop_reply(Some(&Stop::Halt)))
+                        .is_ok();
+                }
                 self.running = true;
-                link.send("OK").is_ok()
+                true
             }
             Reply::Step => {
                 let stop = {
@@ -610,6 +659,7 @@ impl DebugService {
     fn interrupt(&mut self, link: &mut Connection, sim: &mut Simulation) {
         sim.debug_halt();
         self.running = false;
+        self.record("← 0x03（Ctrl-C）→ T02".to_string());
         let _ = link.send(&self.server.stop_reply(Some(&Stop::Halt)));
     }
 
@@ -637,6 +687,23 @@ impl DebugService {
         }
         sim.set_debug_hold(false);
     }
+}
+
+/// Printable, length-capped form of a request, for the window's log.
+fn packet_summary(payload: &[u8]) -> String {
+    const LIMIT: usize = 64;
+    let mut text = String::new();
+    for byte in payload.iter().take(LIMIT) {
+        match byte {
+            b'\n' => text.push_str("\\n"),
+            0x20..=0x7E => text.push(*byte as char),
+            _ => text.push_str(&format!("\\x{byte:02x}")),
+        }
+    }
+    if payload.len() > LIMIT {
+        text.push('…');
+    }
+    text
 }
 
 /// Short description of a reply, for the `GSIM_DEBUG_PACKETS` trace.
@@ -684,10 +751,53 @@ impl DebugWindow {
         self.service.is_listening()
     }
 
+    /// Port the service listens on (or last listened on).
+    pub fn port(&self) -> u16 {
+        self.service.port()
+    }
+
+    /// Starts the service unless it is already listening.
+    pub fn start_default(&mut self) {
+        if self.service.is_listening() {
+            return;
+        }
+        if let Err(error) = self.start(DEFAULT_PORT) {
+            self.service.set_error(format!("{error}（端口被占用？）"));
+        }
+    }
+
+    /// `true` while the debugger needs the frame loop to keep running.
+    ///
+    /// The socket is only serviced from `App::draw`, so the window must keep
+    /// repainting even while the canvas is paused - otherwise GDB waits for a
+    /// reply it will never get and reports a packet error.
+    pub fn needs_frames(&self) -> bool {
+        self.service.needs_frames()
+    }
+
     /// Serves the debugger; called once per frame, whether or not the window is
     /// open, so a running session is never interrupted by closing it.
     pub fn poll(&mut self, sim: &mut Simulation) -> bool {
         self.service.poll(sim)
+    }
+
+    /// Binds `port` (`0` picks a free one) and waits for a debugger.
+    pub fn start(&mut self, port: u16) -> Result<(), String> {
+        match self.service.start(port) {
+            Ok(()) => {
+                self.port_text = self.service.port().to_string();
+                Ok(())
+            }
+            Err(error) => {
+                self.service.set_error(error.clone());
+                Err(error)
+            }
+        }
+    }
+
+    /// Stops listening and hands the core back to the run/pause button.
+    pub fn stop(&mut self, sim: &mut Simulation) {
+        self.service.stop(sim);
     }
 
     /// Draws the window; `sim` is only used by the on/off switch.
@@ -717,16 +827,14 @@ impl DebugWindow {
             if enabled {
                 match self.port_text.trim().parse::<u16>() {
                     Ok(port) if port != 0 => {
-                        if let Err(error) = self.service.start(port) {
-                            self.service.set_error(error);
-                        }
+                        let _ = self.start(port);
                     }
                     _ => self
                         .service
                         .set_error("端口必须是 1–65535 之间的数字".to_string()),
                 }
             } else {
-                self.service.stop(sim);
+                self.stop(sim);
             }
         }
 
@@ -796,6 +904,55 @@ impl DebugWindow {
         }
 
         ui.separator();
+        if sim.debug_pc().is_none() {
+            ui.label(
+                RichText::new("⚠ 还没有加载固件：断点永远不会命中")
+                    .color(COLOR_ERROR)
+                    .strong(),
+            );
+            ui.label(
+                RichText::new("先用工具栏「📂 加载 ELF…」装载固件，再连调试器。")
+                    .small()
+                    .color(COLOR_DIM),
+            );
+        } else {
+            let firmware = match sim.source() {
+                Source::Firmware(path) => Some(path.clone()),
+                _ => None,
+            };
+            let name = firmware
+                .as_ref()
+                .and_then(|path| path.file_name())
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "固件".to_string());
+            let pc = sim.debug_pc().unwrap_or_default();
+            ui.label(
+                RichText::new(format!("{name}  ·  PC = 0x{pc:08X}"))
+                    .monospace()
+                    .small()
+                    .color(COLOR_OK),
+            )
+            .on_hover_text(
+                firmware
+                    .as_ref()
+                    .map(|path| {
+                        format!(
+                            "{}\n必须和 launch.json 里的 executable 是同一个文件，否则断点地址对不上。",
+                            path.display()
+                        )
+                    })
+                    .unwrap_or_default(),
+            );
+            ui.label(
+                RichText::new(
+                    "断点、单步、变量都由这里的仿真执行；附加后先 monitor reset halt 复位再下断点。",
+                )
+                .small()
+                .color(COLOR_DIM),
+            );
+        }
+
+        ui.separator();
         ui.label(RichText::new("连接方式（Cortex-Debug 用「附加」配置）").strong());
         ui.label(
             RichText::new(format!(
@@ -805,12 +962,24 @@ impl DebugWindow {
             .monospace()
             .small(),
         );
-        ui.label(
-            RichText::new(
-                "先在画布上「加载 ELF…」再连调试器：断点、单步、变量都由这里的仿真执行。",
-            )
-            .small()
-            .color(COLOR_DIM),
-        );
+
+        let entries: Vec<String> = self.service.log().map(str::to_string).collect();
+        egui::CollapsingHeader::new(format!("数据包日志（最近 {} 条）", entries.len()))
+            .id_salt("gsim-debug-log")
+            .default_open(false)
+            .show(ui, |ui| {
+                egui::ScrollArea::vertical()
+                    .id_salt("gsim-debug-log-scroll")
+                    .max_height(160.0)
+                    .stick_to_bottom(true)
+                    .show(ui, |ui| {
+                        if entries.is_empty() {
+                            ui.label(RichText::new("（还没有收发）").small().color(COLOR_DIM));
+                        }
+                        for entry in entries.iter().rev() {
+                            ui.label(RichText::new(entry).monospace().small());
+                        }
+                    });
+            });
     }
 }

@@ -649,13 +649,21 @@ impl Simulation {
     }
 
     /// Lets the firmware run on, as GDB's `continue` does.
+    ///
+    /// Without a loaded image there is nothing to run: the core stays halted
+    /// and a stop reason is recorded, so the debugger gets an answer instead of
+    /// waiting for a stop reply that can never come.
     pub fn debug_resume(&mut self) {
-        self.debug_hold = false;
         self.last_stop = None;
         self.halt = None;
-        if let Some(cpu) = self.cpu.as_mut() {
-            cpu.resume();
-        }
+        let Some(cpu) = self.cpu.as_mut() else {
+            self.debug_hold = true;
+            self.running = false;
+            self.last_stop = Some(StopReason::Debug);
+            return;
+        };
+        cpu.resume();
+        self.debug_hold = false;
         self.running = true;
     }
 

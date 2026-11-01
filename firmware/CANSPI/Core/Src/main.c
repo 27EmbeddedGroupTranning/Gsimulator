@@ -35,12 +35,19 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-/* Speed the demo asks the motor for, in rpm: positive forward, negative reverse. */
-#define CAN_MOTOR_DEMO_RPM    600
+/* Peak speed of the sine sweep, in rpm: the shaft runs forward, coasts through
+   zero and runs backwards, so the sign of the command carries the direction. */
+#define CAN_SWING_RPM         1000
 
-/* One half cycle of the heart beat, in milliseconds. */
-#define CAN_BEAT_ON_MS        450U
-#define CAN_BEAT_OFF_MS       150U
+/* One full sine period, in milliseconds. */
+#define CAN_SINE_PERIOD_MS    4000U
+
+/* How often a command frame is queued: 50 frames per second, far below the
+   200 kbit/s the pair runs at, and fast enough to look continuous. */
+#define CAN_SEND_PERIOD_MS    20U
+
+/* Points of the sine table; must be a power of two divisor of the period. */
+#define CAN_SINE_POINTS       64U
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -51,11 +58,28 @@
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
-/* One command per half cycle: forward, coast, reverse, coast. */
-static const int16_t can_motor_demo[4] =
+/* sin(2*pi*i / 64) in Q15, so the sweep needs no floating point in the loop. */
+static const int16_t can_sine_q15[CAN_SINE_POINTS] =
 {
-  CAN_MOTOR_DEMO_RPM, 0, -CAN_MOTOR_DEMO_RPM, 0
+      0,   3212,   6393,   9512,  12539,  15446,  18204,  20787,
+  23170,  25329,  27245,  28898,  30273,  31356,  32137,  32609,
+  32767,  32609,  32137,  31356,  30273,  28898,  27245,  25329,
+  23170,  20787,  18204,  15446,  12539,   9512,   6393,   3212,
+      0,  -3212,  -6393,  -9512, -12539, -15446, -18204, -20787,
+ -23170, -25329, -27245, -28898, -30273, -31356, -32137, -32609,
+ -32767, -32609, -32137, -31356, -30273, -28898, -27245, -25329,
+ -23170, -20787, -18204, -15446, -12539,  -9512,  -6393,  -3212,
 };
+
+/* Target speed of the sweep at `elapsed_ms`, in rpm. */
+static int16_t can_sine_rpm(uint32_t elapsed_ms)
+{
+  uint32_t phase = ((elapsed_ms % CAN_SINE_PERIOD_MS) * CAN_SINE_POINTS)
+                   / CAN_SINE_PERIOD_MS;
+  int32_t scaled = ((int32_t)can_sine_q15[phase] * CAN_SWING_RPM) / 32767;
+
+  return (int16_t)scaled;
+}
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -108,6 +132,10 @@ int main(void)
   /* CAN1 commands the motor of the bench (standard frame 0x200). */
   CAN_Motor_Init();
 
+  /* Clock of the speed sweep. */
+  uint32_t sweep_start = HAL_GetTick();
+  uint32_t next_frame = sweep_start;
+
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -117,15 +145,28 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    /* Let the heart beat: the pixels stay the same, the brightness pulses.
-       The motor keeps time with it - bright means a command to turn. */
-    for (uint32_t phase = 0U; phase < 4U; phase++)
+    /* One command frame every CAN_SEND_PERIOD_MS, so the shaft follows a
+       continuous sine instead of stepping between a few fixed speeds. */
+    uint32_t now = HAL_GetTick();
+    if ((int32_t)(now - next_frame) >= 0)
     {
-      uint8_t bright = (uint8_t)((phase & 1U) == 0U);
+      int16_t rpm = can_sine_rpm(now - sweep_start);
 
-      MAX7219_SetIntensity(bright ? 0x0FU : 0x07U);
-      (void)CAN_Motor_SetSpeedRpm(can_motor_demo[phase]);
-      HAL_Delay(bright ? CAN_BEAT_ON_MS : CAN_BEAT_OFF_MS);
+      (void)CAN_Motor_SetSpeedRpm(rpm);
+
+      /* The heart glows with the speed: still at a standstill, brightest at
+         full swing. */
+      uint32_t magnitude = (rpm < 0) ? (uint32_t)(-rpm) : (uint32_t)rpm;
+      uint32_t level = 7U + (magnitude * 8U) / CAN_SWING_RPM;
+      MAX7219_SetIntensity((uint8_t)((level > 15U) ? 15U : level));
+
+      next_frame += CAN_SEND_PERIOD_MS;
+      if ((int32_t)(now - next_frame) >= 0)
+      {
+        /* A long HAL_Delay (or a debug halt) made us late: resynchronise
+           instead of firing a burst of catch-up frames. */
+        next_frame = now + CAN_SEND_PERIOD_MS;
+      }
     }
   }
   /* USER CODE END 3 */

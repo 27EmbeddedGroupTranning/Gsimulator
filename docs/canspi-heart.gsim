@@ -7,7 +7,8 @@
 # 灯阵要接 VCC/GND 才工作；HSE 晶振接在 PD0/PD1 上，固件用 8 MHz × 9 = 72 MHz。
 #
 # CAN1 用 PA12 = TX、PA11 = RX 经收发器接上总线对；电机与两个 120 Ω 终端电阻跨接在
-# CANH/CANL 上。固件每半个心跳周期发一帧 0x200（大端 int16 rpm），电机跟着正转/滑行/反转。
+# CANH/CANL 上。固件每 20 ms 发一帧 0x200（大端 int16 rpm），转速按 4 s 周期的正弦
+# 在 ±1000 rpm 之间摆动；爱心亮度跟着转速走。
 gsimulator project 1
 device 1 vcc -140.00 60.00
 device 2 gnd -140.00 620.00

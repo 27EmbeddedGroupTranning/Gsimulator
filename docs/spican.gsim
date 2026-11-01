@@ -1,0 +1,42 @@
+gsimulator project 1
+device 1 vcc 374.59 -207.53
+device 2 gnd 509.52 -252.69
+device 3 matrix 520.00 438.82
+device 4 hse -260.00 150.00
+device 5 can 427.80 113.23 mode=normal
+device 6 resistor 695.54 -86.77 ohms=120
+device 8 resistor 697.89 206.83 ohms=120
+device 9 scope 868.07 -215.15 window=2000000 frozen=0
+device 10 motor 1096.64 58.24 cmd=512
+device 11 junction 652.89 129.59
+device 12 junction 822.89 162.02
+device 13 junction 652.89 -5.16
+device 14 junction 822.89 30.47
+device 15 vcc 1025.14 -95.75
+device 16 gnd 1113.97 -169.48
+wire dev:3:0 mcu:0:7
+wire dev:3:1 mcu:0:5
+wire dev:3:2 mcu:0:4
+wire dev:3:3 mcu:0:6
+wire dev:3:4 dev:1:0
+wire dev:3:5 dev:2:0
+wire dev:4:0 mcu:3:0
+wire dev:4:1 mcu:3:1
+wire dev:5:0 mcu:0:12
+wire dev:5:1 mcu:0:11
+wire dev:6:0 dev:13:0
+wire dev:6:1 dev:14:0
+wire dev:11:0 dev:8:0
+wire dev:5:2 dev:11:0
+wire dev:12:0 dev:8:1
+wire dev:5:3 dev:12:0
+wire dev:5:5 dev:2:0
+wire dev:5:4 dev:1:0
+wire dev:9:0 dev:6:0
+wire dev:9:1 dev:6:1
+wire dev:13:0 dev:11:0
+wire dev:14:0 dev:12:0
+wire dev:10:0 dev:13:0
+wire dev:10:1 dev:14:0 1008.00,122.00
+wire dev:16:0 dev:10:3
+wire dev:15:0 dev:10:2

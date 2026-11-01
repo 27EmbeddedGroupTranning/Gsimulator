@@ -39,6 +39,8 @@ pub struct Connection {
     queued: VecDeque<Vec<u8>>,
     acknowledge: bool,
     non_blocking: bool,
+    /// Bytes accepted for sending that the socket has not taken yet.
+    outgoing: Vec<u8>,
 }
 
 impl Connection {
@@ -51,6 +53,7 @@ impl Connection {
             queued: VecDeque::new(),
             acknowledge: true,
             non_blocking: false,
+            outgoing: Vec::new(),
         })
     }
 
@@ -69,14 +72,40 @@ impl Connection {
         self.stream.set_nonblocking(non_blocking)
     }
 
-    /// Sends one packet.
+    /// Queues one packet and writes as much of it as the socket takes.
+    ///
+    /// A non-blocking socket can accept only part of a packet; keeping the rest
+    /// here and retrying on the next poll is what keeps the framing intact.
+    /// A half written packet would make the debugger report a packet error and
+    /// desynchronise the session.
     pub fn send(&mut self, payload: &str) -> io::Result<()> {
-        self.stream.write_all(&rsp::encode(payload))?;
+        self.outgoing.extend_from_slice(&rsp::encode(payload));
+        self.flush_outgoing()
+    }
+
+    /// True when everything queued has reached the socket.
+    pub fn is_flushed(&self) -> bool {
+        self.outgoing.is_empty()
+    }
+
+    fn flush_outgoing(&mut self) -> io::Result<()> {
+        while !self.outgoing.is_empty() {
+            match self.stream.write(&self.outgoing) {
+                Ok(0) => break,
+                Ok(written) => {
+                    self.outgoing.drain(..written);
+                }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(()),
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                Err(error) => return Err(error),
+            }
+        }
         self.stream.flush()
     }
 
     /// Blocks until a packet, an interrupt or the end of the stream arrives.
     pub fn wait(&mut self) -> io::Result<Waiting> {
+        self.flush_outgoing()?;
         loop {
             if let Some(packet) = self.queued.pop_front() {
                 self.acknowledge_arrival()?;
@@ -147,6 +176,9 @@ impl Connection {
     ///
     /// `None` means nothing arrived yet.
     pub fn poll_wait(&mut self) -> io::Result<Option<Waiting>> {
+        // Retry whatever a previous, partly written packet left behind: a
+        // half sent packet is a framing error for the debugger.
+        self.flush_outgoing()?;
         match self.poll()? {
             Poll::Interrupt => return Ok(Some(Waiting::Interrupt)),
             Poll::Closed => return Ok(Some(Waiting::Closed)),
@@ -176,9 +208,8 @@ impl Connection {
 
     fn acknowledge_arrival(&mut self) -> io::Result<()> {
         if self.acknowledge {
-            self.stream.write_all(b"+")?;
-            self.stream.flush()?;
+            self.outgoing.push(b'+');
         }
-        Ok(())
+        self.flush_outgoing()
     }
 }

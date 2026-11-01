@@ -28,6 +28,9 @@ const MAX_BUDGET: u32 = 2_000_000;
 const DEFAULT_BUDGET: u32 = 400_000;
 /// Length of one device-servicing slice of simulated time.
 const SLICE_NS: u64 = 1_000_000;
+/// Instruction budget per frame while a debugger is attached: small enough that
+/// a reply never waits long, large enough that the firmware still moves.
+const DEBUG_BUDGET: u32 = 20_000;
 
 pub struct App {
     sim: Simulation,
@@ -68,8 +71,26 @@ pub struct App {
 
 impl App {
     /// Builds the app for `eframe`, loading the CJK font into the context.
-    pub fn new(cc: &eframe::CreationContext<'_>, elf_path: Option<PathBuf>) -> Self {
-        App::with_context(&cc.egui_ctx, elf_path)
+    ///
+    /// `gdb_port` starts the built-in virtual ST-Link right away, so a debugger
+    /// can attach without touching the window first; `None` leaves it off until
+    /// the 🐞 window switches it on.
+    pub fn new(
+        cc: &eframe::CreationContext<'_>,
+        elf_path: Option<PathBuf>,
+        gdb_port: Option<u16>,
+    ) -> Self {
+        let mut app = App::with_context(&cc.egui_ctx, elf_path);
+        if let Some(port) = gdb_port {
+            match app.debug.start(port) {
+                Ok(()) => eprintln!(
+                    "虚拟 ST-Link 已在 127.0.0.1:{} 上等待调试器",
+                    app.debug.port()
+                ),
+                Err(error) => eprintln!("{error}"),
+            }
+        }
+        app
     }
 
     /// Same as [`App::new`] but with a bare [`egui::Context`], so tests can
@@ -118,6 +139,12 @@ impl App {
             uart_input: std::collections::BTreeMap::new(),
             motor_rpm: std::collections::BTreeMap::new(),
         }
+    }
+
+    /// The debug window, so tools and tests can start the service without
+    /// clicking the toolbar.
+    pub fn debug_window_mut(&mut self) -> &mut DebugWindow {
+        &mut self.debug
     }
 
     fn load_firmware(&mut self) {
@@ -311,14 +338,14 @@ impl App {
                 self.can_bus.toggle();
             }
             let debug_label = if self.debug.is_listening() {
-                "🐞 调试服务 ●"
+                format!("🐞 调试服务 :{} ●", self.debug.port())
             } else {
-                "🐞 调试服务"
+                "🐞 调试服务".to_string()
             };
             if ui
                 .selectable_label(self.debug.open, debug_label)
                 .on_hover_text(
-                    "在指定端口上开启虚拟 ST-Link，让 GDB / VS Code 调试这份正在运行的仿真",
+                    "虚拟 ST-Link 的开关与端口（启动时已在 3333 监听）：让 GDB / VS Code 调试这份正在运行的仿真",
                 )
                 .clicked()
             {
@@ -1403,11 +1430,26 @@ impl App {
         self.sim.set_crystals(self.board.crystals());
         // Serve the debugger first: a halt takes effect before this frame runs.
         self.debug.poll(&mut self.sim);
+        if self.debug.needs_frames() {
+            // The debugger's socket is only serviced by this frame loop, so the
+            // window has to keep drawing even when the canvas is paused or has
+            // nothing to animate - otherwise GDB waits, times out and reports
+            // "Ignoring packet error".
+            ctx.request_repaint();
+        }
         if self.snapshot.running {
+            // A debugger waits for a reply after every packet, so the frame has
+            // to stay short while one is attached: a full budget in a debug
+            // build takes long enough for GDB to give up on the request.
+            let budget = if self.debug.needs_frames() {
+                self.budget.min(DEBUG_BUDGET)
+            } else {
+                self.budget
+            };
             // Service the parts first, then let the core run a millisecond at a
             // time, so encoder edges and terminal bytes land between
             // instructions instead of only at frame boundaries.
-            bridge::run_frame(&mut self.board, &mut self.sim, self.budget, SLICE_NS);
+            bridge::run_frame(&mut self.board, &mut self.sim, budget, SLICE_NS);
             ctx.request_repaint();
         } else {
             // Devices stay live while paused: a knob turn or a typed line is

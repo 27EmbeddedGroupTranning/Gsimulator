@@ -201,7 +201,16 @@ cargo run -p gsimulator-gui              # 手动确认：能放置、能连线�
   把“要不要跑”交回调用方：CLI 在 `session()` 里阻塞着跑到停止，GUI 只在帧循环里推进仿真，
   所以**断点停的是画布上那份仿真**。
 * GUI 的 `DebugService` 用非阻塞 `Connection`（`poll_wait`、`set_non_blocking`），
-  每帧最多处理 `PACKETS_PER_FRAME` 个包；`GSIM_DEBUG_PACKETS=1` 会把收发的包打到 stderr。
+  每帧最多处理 `PACKETS_PER_FRAME` 个包；窗内的「数据包日志」与 `GSIM_DEBUG_PACKETS=1`（stderr）
+  都能看收发。三条**不能破坏**的约束：
+  * **socket 只在这个帧循环里被服务**，所以 `App::draw` 在 `DebugWindow::needs_frames()` 为真时必须
+    `ctx.request_repaint()`；否则暂停时窗口不重绘，GDB 等不到回包就报 `Ignoring packet error`。
+  * **`vCont;c` 不能先回 `OK`**：真探针在 continue 之后下一条包就是停止回复，多一个 `OK` 会让部分 GDB 版本报错。
+  * **新连接取代旧连接**：VS Code 每次会话重连而旧 socket 常常还开着，只服务"第一个"客户端会把新调试器饿死。
+  * **每个新连接都要 `GdbServer::begin_session()`**：`QStartNoAckMode` 只属于一个连接，
+    泄漏到下一次会话会少发 `+`，GDB 报 `Packet instead of Ack, ignoring it` 并最终超时。
+  * **`Connection::send` 允许半写**：socket 非阻塞时可能只写出一部分，剩余字节留在 `outgoing`
+    里下次 `poll_wait` 补发；直接 `write_all` 会留下半个包，GDB 会报 packet error 并失步。
 
 新增一个 RSP 请求的流程：
 

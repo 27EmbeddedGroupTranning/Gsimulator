@@ -9,7 +9,7 @@
 
 ![Rust](https://img.shields.io/badge/Rust-1.85%2B-000?logo=rust&logoColor=white)
 ![Platform](https://img.shields.io/badge/平台-Windows%20%7C%20Linux%20%7C%20macOS-informational)
-![Tests](https://img.shields.io/badge/tests-429%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-433%20passing-brightgreen)
 ![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)
 
 [快速开始](#quickstart) · [图形前端](#gui) · [命令行](#cli) · [调试](#debug) · [架构](#arch) · [外设](#peripherals) · [测试](#tests)
@@ -213,7 +213,7 @@ cargo run -p gsimulator-cli -- flash firmware/CAN/build/Debug/CAN.elf
 | 工程 | 内容 |
 | --- | --- |
 | [`firmware/CAN`](firmware/CAN) | **外设自检固件**：不经过 HAL，直接用寄存器把每个已建模外设跑一遍，在 USART1 上逐行打印 `OK`，最后 `ONCHIP 23/23`；之后进入主循环服务原理图上的终端、灯阵、编码器、LED、CAN |
-| [`firmware/CANSPI`](firmware/CANSPI) | CubeMX + HAL 工程：SPI1（PA5/PA7/PA4）驱动 MAX7219，上电画一颗爱心并做亮度「心跳」 |
+| [`firmware/CANSPI`](firmware/CANSPI) | CubeMX + HAL 工程：SPI1（PA5/PA7/PA4）驱动 MAX7219 画一颗爱心；CAN1（200 kbit/s）每 20 ms 发一帧 `0x200`，把目标转速按 **4 s 周期的正弦（±1000 rpm）** 送给总线上的电机，爱心亮度跟着转速走 |
 
 ```powershell
 cd firmware\CAN
@@ -272,16 +272,32 @@ EVT READY
 
 ### 方式 A：调试 GUI 里正在跑的那份仿真（推荐）
 
-1. `cargo run -p gsimulator-gui`
+1. `cargo run -p gsimulator-gui` —— 调试服务**默认已在 127.0.0.1:3333 监听**（工具栏按钮会显示
+   `🐞 调试服务 :3333 ●`；不想要就加 `--no-gdb`，换端口用 `--gdb-port 3344`）
 2. 「📂 加载 ELF…」选固件（例如 `firmware/CANSPI/build/Debug/CANSPI.elf`），「▶ 运行」
-3. 工具栏「🐞 调试服务」→ 勾选**开启调试服务**，端口 `3333`
-4. VS Code F5 → 选 **「Gsimulator GUI：附加到图形前端」**
+3. VS Code F5 → 选 **「Gsimulator GUI：附加到图形前端」**
 
 服务器跑在 UI 线程上、每帧服务一次 socket，所以**断点命中的就是画布上这份仿真**：
 画面立刻停住，单步时能看着点阵一行行走。附加后固件通常已经跑过 `main`，
 配置里已内置 `monitor reset halt` 复位再停在 `main`。
 仓库根目录与 `firmware/CANSPI` 的 [`.vscode/launch.json`](.vscode/launch.json) 都带这条配置
 （`servertype: "external"` + `gdbTarget: "127.0.0.1:3333"`，另有一条自动起 CLI 服务器的配置）。
+
+窗口里还有三样排查用的东西：
+
+* **固件名与 PC**：断点打不上时先看这里——GUI 跑的必须是 `launch.json` 里那个 `executable`，
+  否则地址对不上，VS Code 会显示空心断点；没加载固件时窗口直接红字提示「断点永远不会命中」。
+* **📜 数据包日志**（可展开）：最近 60 条 RSP 收发，一眼看出 `Z1,8001e0e,2` 到底有没有发过来。
+* **连接替换**：VS Code 每次会话都会新开连接，旧 socket 常常还开着；服务总是让**最新**的调试器接管，
+  不会让上一个已经死掉的连接把新连接饿死（那正是 GDB 报 `Ignoring packet error, continuing...` 的典型原因）。
+
+服务监听或已连接时，即使画布暂停也会持续重绘——socket 只在这个帧循环里被服务，
+不重绘就等于不回包，GDB 会以为服务器挂了。调试器连接期间每帧的指令预算也会自动降到
+2 万条，回复永远等不了几百毫秒。
+
+> 排错经验：GDB 报 `Ignoring packet error, continuing...` / `unexpectedly to 'vMustReplyEmpty': timeout`
+> 通常是**上一个会话的 `QStartNoAckMode` 泄漏到了新连接**（少了 `+` 应答，GDB 就把回包当噪声丢掉重试）。
+> 现在每个新连接都会重置应答状态，`cargo test -p gsimulator-gui --test debug_service` 里有对应用例。
 
 ### 方式 B：命令行起一个独立仿真
 
@@ -448,7 +464,7 @@ CAN 不是「帧队列」，而是真实的两线差分总线，每一层都有�
 ## 🧪 测试
 
 ```powershell
-cargo test --workspace                       # 429 条，全绿
+cargo test --workspace                       # 433 条，全绿
 cargo clippy --workspace --all-targets       # 零告警
 cargo fmt --all
 ```
@@ -460,7 +476,7 @@ cargo fmt --all
 | `gsim-cpu` | 手写 Thumb 程序（不依赖交叉编译器）+ 真实 GCC 固件端到端执行（含「多中断使能不丢位」「`.data` 从 flash LMA 装载」） |
 | `gsim-gdb` | RSP 编解码、真实 TCP 调试会话（擦写+回读、断点/单步、数据断点、Ctrl-C、`monitor`、`qXfer`），以及一条跑真实 `arm-none-eabi-gdb` 的端到端用例 |
 | `gsim-devices` | 器件模型单元测试 + 两条端到端链路：SPI1 写寄存器 → MAX7219 点阵；CAN 发帧 → 收发器 → 虚拟总线 → 另一节点 FIFO |
-| `gsimulator-gui` | 电气规则（网络合并、短路、LED 极性）、点击连线状态机、无窗口整帧渲染、激励表达式、各窗口离屏渲染、**GUI 内建调试服务**（含真实 gdb 附加到画布仿真） |
+| `gsimulator-gui` | 电气规则（网络合并、短路、LED 极性）、点击连线状态机、无窗口整帧渲染、激励表达式、各窗口离屏渲染、**GUI 内建调试服务**（断点冻结仿真、旧连接被新调试器取代、暂停时仍持续应答、真实 gdb 附加到画布仿真） |
 
 > 缺 GPU / 交叉编译器 / `arm-none-eabi-gdb` 的机器上，相关用例会自动跳过而不是失败。
 
