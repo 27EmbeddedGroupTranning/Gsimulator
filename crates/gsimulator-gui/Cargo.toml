@@ -11,6 +11,7 @@ gsim-core.workspace = true
 gsim-stm32f1.workspace = true
 gsim-devices.workspace = true
 gsim-cpu.workspace = true
+gsim-gdb.workspace = true
 eframe = "0.32"
 egui = "0.32"
 rfd = "0.15"

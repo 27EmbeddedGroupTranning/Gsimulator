@@ -24,5 +24,6 @@ pub mod rsp;
 pub mod server;
 pub mod target;
 
-pub use server::{GdbServer, ServerOptions};
-pub use target::{FlashReport, PointKind, Signal, Stop, Target};
+pub use connection::{Connection, Poll, Waiting};
+pub use server::{GdbServer, Reply, ServerOptions};
+pub use target::{DebugTarget, FlashReport, PointKind, Signal, Stop, Target};

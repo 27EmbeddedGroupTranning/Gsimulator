@@ -221,3 +221,29 @@ fn reconfiguring_while_running_keeps_running() {
     assert!(!sim.is_running(), "a paused stimulus must stay paused");
     assert_eq!(sim.stimulus().pin, 14);
 }
+
+#[test]
+fn a_square_stimulus_reports_its_duty_so_an_led_dims() {
+    let mut sim = Simulation::new();
+    // 20 ms period at 25 %: the pin is high a quarter of the time.
+    sim.set_stimulus_config(square(0, 5, 10_000_000, 0.25))
+        .expect("config must be valid");
+    sim.start_stimulus();
+
+    advance_ns(&mut sim, 7_000_000);
+    let levels = sim.pin_levels();
+    assert!(!levels.level_of(0, 5), "the sampled instant is low");
+    assert!(
+        (levels.duty_of(0, 5) - 0.25).abs() < 1e-6,
+        "the waveform duty must be visible, got {}",
+        levels.duty_of(0, 5)
+    );
+    assert_eq!(levels.duty_of(0, 6), 0.0, "idle pins hold no duty");
+
+    sim.stop_stimulus();
+    assert_eq!(
+        sim.pin_levels().duty_of(0, 5),
+        0.0,
+        "a released pin stops modulating"
+    );
+}

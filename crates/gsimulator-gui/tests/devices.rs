@@ -7,8 +7,8 @@ use gsim_devices::Direction;
 use gsim_stm32f1::map;
 use gsimulator_gui::board::{
     Board, DeviceKind, PinRef, CAN_CANH, CAN_CANL, CAN_RXD, CAN_TXD, ENCODER_A, ENCODER_B,
-    ENCODER_SW, JUNCTION_PIN, MATRIX_CLK, MATRIX_CS, MATRIX_DIN, MATRIX_DOUT, POWER_PIN,
-    RESISTOR_A, RESISTOR_B, SCOPE_CANH, SCOPE_CANL, UART_RX, UART_TX,
+    ENCODER_SW, JUNCTION_PIN, MATRIX_CLK, MATRIX_CS, MATRIX_DIN, MATRIX_DOUT, MOTOR_CANH,
+    MOTOR_CANL, POWER_PIN, RESISTOR_A, RESISTOR_B, SCOPE_CANH, SCOPE_CANL, UART_RX, UART_TX,
 };
 use gsimulator_gui::bridge::{self, USART_RX_PINS, USART_TX_PINS};
 use gsimulator_gui::sim::Simulation;
@@ -624,6 +624,83 @@ fn an_unpowered_matrix_ignores_the_spi_port() {
     assert_eq!(handle.borrow().frames(), 0, "no supply, no frames");
 }
 
+#[test]
+fn editing_a_resistor_value_changes_the_bus_quality() {
+    let (mut board, _scope) = can_board();
+    let resistors: Vec<u32> = board
+        .devices()
+        .iter()
+        .filter(|device| device.kind == DeviceKind::Resistor)
+        .map(|device| device.id)
+        .collect();
+    assert_eq!(resistors.len(), 2);
+
+    let ideal = board.can_network();
+    assert!((ideal.termination_ohm.unwrap() - 60.0).abs() < 1e-6);
+    assert!((ideal.quality() - 1.0).abs() < 1e-9);
+
+    // Two 30 Ω parts in parallel: 15 Ω, four times the load the pair wants.
+    for id in &resistors {
+        board
+            .device_mut(*id)
+            .and_then(|device| device.hardware.resistor_mut())
+            .expect("resistor model")
+            .set_ohms(30.0);
+    }
+    let overloaded = board.can_network();
+    let ohms = overloaded.termination_ohm.expect("termination");
+    assert!((ohms - 15.0).abs() < 1e-6, "{ohms}");
+    assert!(
+        overloaded.quality() < 0.3,
+        "quality {}",
+        overloaded.quality()
+    );
+    assert!(gsim_devices::bit_error_rate(overloaded.quality()) > 0.01);
+
+    // Keep one terminator and make the other one negligible: the pair is now
+    // damped at one end only, marginal but far from hopeless.
+    for (index, id) in resistors.iter().enumerate() {
+        let ohms = if index == 0 { 120.0 } else { 1_000_000.0 };
+        board
+            .device_mut(*id)
+            .and_then(|device| device.hardware.resistor_mut())
+            .expect("resistor model")
+            .set_ohms(ohms);
+    }
+    let single = board.can_network();
+    assert!(single.quality() < ideal.quality());
+    assert!(single.quality() > overloaded.quality());
+
+    // And a real transmission on the overloaded pair loses bits.
+    let mut sim = Simulation::new();
+    sim.stop_stimulus();
+    open_can1(&mut sim);
+    sim.set_running(true);
+    for id in &resistors {
+        board
+            .device_mut(*id)
+            .and_then(|device| device.hardware.resistor_mut())
+            .expect("resistor model")
+            .set_ohms(30.0);
+    }
+    for _ in 0..6 {
+        board
+            .can_bus()
+            .borrow_mut()
+            .inject_bit_frame(gsim_core::CanFrame::standard(0x321, b"GSIM"), sim.now_ns());
+        run(&mut board, &mut sim, 30);
+    }
+    let bus = board.can_bus();
+    let bus = bus.borrow();
+    assert!(bus.glitches() > 0, "a 15 Ω pair must corrupt bits");
+    assert!(bus.stats().error_frames > 0, "{:?}", bus.stats());
+    assert!(
+        bus.dominant_millivolts() < 1_000.0,
+        "an overloaded pair cannot swing the full differential: {} mV",
+        bus.dominant_millivolts()
+    );
+}
+
 /// `CAN1` base address, as the firmware sees it.
 const CAN: u32 = map::can::BASE_1;
 
@@ -696,6 +773,100 @@ fn can_board() -> (Board, u32) {
         },
     );
     (board, scope)
+}
+
+/// Wires a motor across the pair of the terminated bus from [`can_board`],
+/// with its supply on the rails.
+fn motor_board() -> (Board, u32) {
+    let (mut board, _scope) = can_board();
+    let motor = board.add_motor(egui::Pos2::new(700.0, 470.0));
+    power(&mut board, motor);
+    let transceiver = board
+        .first_of(DeviceKind::Can)
+        .expect("the bus board has a transceiver")
+        .id;
+    for (from, to) in [(CAN_CANH, MOTOR_CANH), (CAN_CANL, MOTOR_CANL)] {
+        board.connect(
+            PinRef::Device {
+                device: transceiver,
+                pin: from,
+            },
+            PinRef::Device {
+                device: motor,
+                pin: to,
+            },
+        );
+    }
+    (board, motor)
+}
+
+/// The handle of a placed motor.
+fn motor_of(board: &Board, id: u32) -> std::rc::Rc<std::cell::RefCell<gsim_devices::Motor>> {
+    board
+        .device(id)
+        .expect("the motor is placed")
+        .hardware
+        .motor()
+        .cloned()
+        .expect("motor model")
+}
+
+#[test]
+fn a_command_frame_from_the_wire_spins_the_motor() {
+    let (mut board, motor_id) = motor_board();
+    let mut sim = Simulation::new();
+    sim.stop_stimulus();
+    sim.set_running(true);
+    assert_eq!(
+        board.can_network().motors.len(),
+        1,
+        "the motor sits on the pair"
+    );
+
+    let speed: i16 = 1200;
+    let [high, low] = speed.to_be_bytes();
+    board.can_bus().borrow_mut().inject_bit_frame(
+        gsim_core::CanFrame::standard(0x200, &[high, low]),
+        sim.now_ns(),
+    );
+    run(&mut board, &mut sim, 20);
+
+    let motor = motor_of(&board, motor_id);
+    let motor = motor.borrow();
+    assert_eq!(motor.commands(), 1, "the motor decoded the command");
+    assert_eq!(motor.target_rpm(), 1200.0);
+    assert!(
+        motor.rpm() > 0.0,
+        "the shaft accelerated: {} rpm",
+        motor.rpm()
+    );
+    assert!(motor.turns() > 0.0, "the shaft turned");
+}
+
+#[test]
+fn a_motor_off_the_pair_stays_put_and_hears_nothing() {
+    // Same part, but its two contacts are not wired to the transceiver.
+    let mut board = Board::new();
+    let motor_id = board.add_motor(egui::Pos2::new(700.0, 470.0));
+    power(&mut board, motor_id);
+    board.add_can(egui::Pos2::new(500.0, 200.0));
+    assert!(board.can_network().motors.is_empty());
+
+    let mut sim = Simulation::new();
+    sim.stop_stimulus();
+    sim.set_running(true);
+    let command = gsim_core::CanFrame::standard(0x200, &1200i16.to_be_bytes());
+    board
+        .can_bus()
+        .borrow_mut()
+        .inject_bit_frame(command, sim.now_ns());
+    run(&mut board, &mut sim, 10);
+
+    let motor = motor_of(&board, motor_id);
+    let motor = motor.borrow();
+    assert_eq!(motor.commands(), 0, "an unwired motor hears nothing");
+    assert_eq!(motor.rpm(), 0.0);
+    assert!(!motor.enabled(), "and it is taken off the bus");
 }
 
 /// `HAL_CAN_Init` + `HAL_CAN_Start` for normal mode, with one 32 bit mask
@@ -959,4 +1130,160 @@ fn two_nodes_that_start_together_arbitrate_on_the_drawn_bus() {
         .collect();
     assert!(ids.contains(&0x100), "{ids:?}");
     assert!(ids.contains(&0x321), "{ids:?}");
+}
+
+/// Wires an LED from `PA6` to ground, the way a PWM dimmed indicator is built.
+fn pwm_led_board() -> (Board, u32) {
+    let mut board = Board::new();
+    let led = board.add_led(egui::Pos2::new(400.0, 200.0));
+    board.connect(
+        PinRef::Mcu { port: 0, pin: 6 },
+        PinRef::Device {
+            device: led,
+            pin: 0,
+        },
+    );
+    let gnd = board.add_gnd(egui::Pos2::new(40.0, 700.0));
+    board.connect(
+        PinRef::Device {
+            device: gnd,
+            pin: POWER_PIN,
+        },
+        PinRef::Device {
+            device: led,
+            pin: 1,
+        },
+    );
+    (board, led)
+}
+
+/// Starts `TIM3_CH1` as a 1 kHz PWM on `PA6`, as `HAL_TIM_PWM_Start()` does.
+fn open_pwm_on_pa6(sim: &mut Simulation, percent: u32) {
+    let gpioa = map::gpio::PORTS[0];
+    let tim = map::tim::BASE_3;
+    sim.with_soc(|soc| {
+        soc.write(
+            map::rcc::BASE + map::rcc::APB1ENR,
+            AccessWidth::Word,
+            1 << 1,
+        )
+        .unwrap();
+        soc.write(
+            map::rcc::BASE + map::rcc::APB2ENR,
+            AccessWidth::Word,
+            1 << 2,
+        )
+        .unwrap();
+        // PA6 as an alternate-function push-pull output at 50 MHz.
+        let shift = 6 * 4;
+        let crl = (0x4444_4444u32 & !(0xF << shift)) | (0b1011 << shift);
+        soc.write(gpioa + map::gpio::CRL, AccessWidth::Word, crl)
+            .unwrap();
+        soc.write(tim + map::tim::PSC, AccessWidth::Half, 7)
+            .unwrap();
+        soc.write(tim + map::tim::ARR, AccessWidth::Half, 999)
+            .unwrap();
+        soc.write(
+            tim + map::tim::CCR1,
+            AccessWidth::Half,
+            1000 * percent / 100,
+        )
+        .unwrap();
+        // PWM mode 1 with preload, channel 1 enabled, counter running.
+        soc.write(tim + map::tim::CCMR1, AccessWidth::Half, 0x60)
+            .unwrap();
+        soc.write(tim + map::tim::CCER, AccessWidth::Half, 1)
+            .unwrap();
+        soc.write(tim + map::tim::CR1, AccessWidth::Half, 1)
+            .unwrap();
+    });
+}
+
+#[test]
+fn a_pwm_channel_dims_the_led_to_its_duty_cycle() {
+    let (mut board, led) = pwm_led_board();
+    let mut sim = Simulation::new();
+    open_pwm_on_pa6(&mut sim, 25);
+
+    // A few frames are enough: the duty is measured over whole PWM periods.
+    for _ in 0..4 {
+        bridge::run_frame(&mut board, &mut sim, 20_000, 1_000_000);
+    }
+
+    let levels = sim.pin_levels();
+    assert!(
+        levels.is_output(0, 6),
+        "PA6 is an alternate-function output"
+    );
+    let duty = levels.duty_of(0, 6);
+    assert!((duty - 0.25).abs() < 0.05, "measured duty {duty}");
+
+    let state = board.evaluate(&levels);
+    let brightness = state.led_brightness(led);
+    assert!(
+        (brightness - 0.25).abs() < 0.05,
+        "the LED must dim to the duty cycle, brightness {brightness}"
+    );
+    assert!(state.led_lit(led));
+}
+
+#[test]
+fn an_led_on_a_dimming_channel_follows_the_compare_value() {
+    let (mut board, led) = pwm_led_board();
+    let mut sim = Simulation::new();
+    open_pwm_on_pa6(&mut sim, 20);
+
+    for _ in 0..10 {
+        bridge::run_frame(&mut board, &mut sim, 20_000, 1_000_000);
+    }
+    let dim = board.evaluate(&sim.pin_levels()).led_brightness(led);
+    assert!(dim < 0.35, "20 % duty looks dim, got {dim}");
+
+    // The firmware widens the pulse.
+    sim.with_soc(|soc| {
+        soc.write(map::tim::BASE_3 + map::tim::CCR1, AccessWidth::Half, 800)
+            .unwrap();
+    });
+    for _ in 0..30 {
+        bridge::run_frame(&mut board, &mut sim, 20_000, 1_000_000);
+    }
+    let bright = board.evaluate(&sim.pin_levels()).led_brightness(led);
+    assert!(bright > 0.7, "80 % duty looks bright, got {bright}");
+    assert!(bright > dim);
+}
+
+#[test]
+fn an_active_low_pwm_channel_dims_the_led_from_the_other_side() {
+    // VCC -> A, PA6 -> K: the LED is bright while the pin is low.
+    let mut board = Board::new();
+    let led = board.add_led(egui::Pos2::new(400.0, 200.0));
+    let vcc = board.add_vcc(egui::Pos2::new(40.0, 700.0));
+    board.connect(
+        PinRef::Device {
+            device: vcc,
+            pin: POWER_PIN,
+        },
+        PinRef::Device {
+            device: led,
+            pin: 0,
+        },
+    );
+    board.connect(
+        PinRef::Mcu { port: 0, pin: 6 },
+        PinRef::Device {
+            device: led,
+            pin: 1,
+        },
+    );
+    let mut sim = Simulation::new();
+    open_pwm_on_pa6(&mut sim, 25);
+
+    for _ in 0..10 {
+        bridge::run_frame(&mut board, &mut sim, 20_000, 1_000_000);
+    }
+    let brightness = board.evaluate(&sim.pin_levels()).led_brightness(led);
+    assert!(
+        (brightness - 0.75).abs() < 0.05,
+        "a 25 % high duty sinks current 75 % of the time, got {brightness}"
+    );
 }

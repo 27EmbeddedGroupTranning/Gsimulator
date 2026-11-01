@@ -66,6 +66,29 @@ fn firmware_reports_the_expected_peripheral_state() {
 }
 
 #[test]
+fn firmware_pwm_reaches_its_alternate_function_pin() {
+    let Some((_log, soc, instructions)) = run_smoke_firmware() else {
+        eprintln!("arm-none-eabi-gcc not found, skipping firmware test");
+        return;
+    };
+    let mut soc = soc.borrow_mut();
+    assert_eq!(
+        soc.tim_channel_pin(2, 0),
+        Some((0, 6)),
+        "TIM3_CH1 belongs on PA6"
+    );
+    // A few more periods of the 1 kHz waveform the firmware configured.
+    soc.advance_ns(10_000_000);
+    let duty = soc.pin_duty(0, 6).unwrap_or_else(|| {
+        panic!("the firmware left PA6 as a plain input after {instructions} instructions")
+    });
+    assert!(
+        (duty - 0.25).abs() < 0.05,
+        "the firmware asked for 25 % and the pin measures {duty}"
+    );
+}
+
+#[test]
 fn firmware_keeps_running_after_the_report() {
     let Some((log, soc, _instructions)) = run_smoke_firmware() else {
         eprintln!("arm-none-eabi-gcc not found, skipping firmware test");

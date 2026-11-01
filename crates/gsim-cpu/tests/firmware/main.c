@@ -159,7 +159,17 @@ static void exti_init(void)
 
 static void tim3_init(void)
 {
+    RCC_APB2ENR = RCC_APB2ENR | (1U << 2); /* GPIOA */
     RCC_APB1ENR = RCC_APB1ENR | (1U << 1); /* TIM3 */
+
+    /* PA6 as a 50 MHz alternate-function push-pull output: that is where
+     * TIM3_CH1 drives the PWM waveform. */
+    {
+        uint32_t crl = GPIOA_CRL;
+        crl &= ~(0xFU << 24);
+        crl |= (0xBU << 24);
+        GPIOA_CRL = crl;
+    }
 
     TIM3_PSC = 7U;      /* 8 MHz / 8 = 1 MHz counter clock */
     TIM3_ARR = 999U;    /* 1 kHz period */

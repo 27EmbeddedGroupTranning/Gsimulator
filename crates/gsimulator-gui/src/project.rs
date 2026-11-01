@@ -65,6 +65,9 @@ pub fn to_text(board: &Board) -> String {
                     u8::from(scope.frozen())
                 );
             }
+            Hardware::Motor(motor) => {
+                let _ = write!(text, " cmd={}", motor.borrow().command_id());
+            }
             Hardware::None | Hardware::Encoder(_) | Hardware::Matrix(_) | Hardware::Crystal(_) => {}
         }
         text.push('\n');
@@ -212,6 +215,10 @@ fn apply_option(board: &mut Board, id: DeviceId, key: &str, value: &str) -> Resu
                 mode_from_token(value).ok_or_else(|| format!("收发器模式 `{value}` 未知"))?;
             transceiver.borrow_mut().set_mode(mode);
         }
+        ("cmd", Hardware::Motor(motor)) => {
+            let command_id = parse_command_id(value)?;
+            motor.borrow_mut().set_command_id(command_id);
+        }
         ("window", Hardware::Scope(scope)) => {
             let ns: u64 = value
                 .parse()
@@ -300,6 +307,7 @@ fn kind_token(kind: DeviceKind) -> &'static str {
         DeviceKind::LseCrystal => "lse",
         DeviceKind::Resistor => "resistor",
         DeviceKind::Scope => "scope",
+        DeviceKind::Motor => "motor",
         DeviceKind::Junction => "junction",
     }
 }
@@ -309,6 +317,21 @@ fn kind_from_token(token: &str) -> Option<DeviceKind> {
         .iter()
         .copied()
         .find(|kind| kind_token(*kind) == token)
+}
+
+/// Command identifier of a motor, written as decimal or `0x` hexadecimal.
+fn parse_command_id(value: &str) -> Result<u16, String> {
+    let text = value.trim();
+    let (digits, radix) = match text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
+        Some(digits) => (digits, 16),
+        None => (text, 10),
+    };
+    let id = u16::from_str_radix(digits, radix)
+        .map_err(|_| format!("电机指令 ID `{value}` 不是数字"))?;
+    if id > 0x7FF {
+        return Err(format!("电机指令 ID `{value}` 超出 0x000..0x7FF"));
+    }
+    Ok(id)
 }
 
 fn mode_token(mode: TransceiverMode) -> &'static str {
@@ -394,6 +417,45 @@ mod tests {
         assert_eq!(
             device.hardware.resistor().map(|resistor| resistor.ohms()),
             Some(60.0)
+        );
+    }
+
+    #[test]
+    fn the_motor_command_identifier_survives_the_round_trip() {
+        let mut board = Board::new();
+        let motor = board.add_motor(Pos2::new(300.0, 120.0));
+        board
+            .device_mut(motor)
+            .and_then(|device| device.hardware.motor())
+            .expect("a motor")
+            .borrow_mut()
+            .set_command_id(0x2A5);
+        let text = to_text(&board);
+        assert!(text.contains("motor"), "saved text: {text}");
+        assert!(text.contains("cmd=677"), "saved text: {text}");
+
+        let loaded = round_trip(&board);
+        let device = loaded.devices().first().expect("one device");
+        assert_eq!(
+            device
+                .hardware
+                .motor()
+                .map(|motor| motor.borrow().command_id()),
+            Some(0x2A5)
+        );
+    }
+
+    #[test]
+    fn a_hexadecimal_motor_identifier_is_accepted() {
+        let text = format!("{MAGIC}\ndevice 1 motor 100.00 100.00 cmd=0x2A5\n");
+        let board = from_text(&text).expect("the file parses");
+        let device = board.devices().first().expect("one device");
+        assert_eq!(
+            device
+                .hardware
+                .motor()
+                .map(|motor| motor.borrow().command_id()),
+            Some(0x2A5)
         );
     }
 

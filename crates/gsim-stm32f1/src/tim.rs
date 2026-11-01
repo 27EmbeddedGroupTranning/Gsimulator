@@ -55,6 +55,11 @@ pub mod sr {
     pub const CC1OF: u32 = 1 << 9;
 }
 
+/// `BDTR` bits.
+pub mod bdtr {
+    pub const MOE: u32 = 1 << 15;
+}
+
 /// `EGR` bits.
 pub mod egr {
     pub const UG: u32 = 1 << 0;
@@ -125,6 +130,10 @@ pub struct Tim {
     acc: NanoAccumulator,
     input_levels: [bool; 4],
     input_previous: [bool; 4],
+    /// Counter ticks each compare output spent high, and in total, over the
+    /// measurement window. This is what reports the PWM duty cycle.
+    output_high_ticks: [u64; 4],
+    output_ticks: [u64; 4],
     update_irq_high: bool,
     cc_irq_high: bool,
     update_dma_request: bool,
@@ -161,6 +170,8 @@ impl Tim {
             acc: NanoAccumulator::new(),
             input_levels: [false; 4],
             input_previous: [false; 4],
+            output_high_ticks: [0; 4],
+            output_ticks: [0; 4],
             update_irq_high: false,
             cc_irq_high: false,
             update_dma_request: false,
@@ -214,25 +225,48 @@ impl Tim {
         field(ccmr, ccmr_channel_shift(channel) + 4, 3)
     }
 
+    /// True while the counter runs downwards, which swaps the PWM reference of
+    /// the up/down counting modes.
+    fn counting_down(&self) -> bool {
+        if self.cr1 & cr1::CMS != 0 {
+            self.counting_down
+        } else {
+            self.cr1 & cr1::DIR != 0
+        }
+    }
+
+    /// True when the compare output of `channel` reaches its pin: the channel
+    /// must be an enabled output and the advanced timer needs `MOE` set.
+    pub fn output_enabled(&self, channel: usize) -> bool {
+        if channel >= 4 || self.channel_is_input(channel) {
+            return false;
+        }
+        if self.ccer & cc_enable_bit(channel) == 0 {
+            return false;
+        }
+        !self.advanced || self.bdtr & bdtr::MOE != 0
+    }
+
     /// Effective level of a compare output, honouring the output mode and
     /// polarity. Returns `None` when the channel is not an output.
     pub fn output_level(&self, channel: usize) -> Option<bool> {
         if channel >= 4 || self.channel_is_input(channel) {
             return None;
         }
+        let down = self.counting_down();
         let active = match self.output_mode(channel) {
             4 => false,
             5 => true,
             6 => {
-                if self.cr1 & cr1::DIR != 0 {
-                    self.cnt > self.ccr[channel]
+                if down {
+                    self.cnt <= self.ccr[channel]
                 } else {
                     self.cnt < self.ccr[channel]
                 }
             }
             7 => {
-                if self.cr1 & cr1::DIR != 0 {
-                    self.cnt <= self.ccr[channel]
+                if down {
+                    self.cnt > self.ccr[channel]
                 } else {
                     self.cnt >= self.ccr[channel]
                 }
@@ -241,6 +275,90 @@ impl Tim {
         };
         let inverted = self.ccer & cc_polarity_bit(channel) != 0;
         Some(active != inverted)
+    }
+
+    /// Measured high-time fraction of an enabled compare output.
+    ///
+    /// The timer integrates the level over the counter ticks it just ran, so
+    /// the value is exact per PWM period and does not alias when the front end
+    /// samples it once per frame. `None` while the channel drives no pin or has
+    /// not counted yet.
+    pub fn channel_duty(&self, channel: usize) -> Option<f32> {
+        if !self.output_enabled(channel) {
+            return None;
+        }
+        let total = self.output_ticks.get(channel).copied().unwrap_or(0);
+        if total == 0 {
+            return None;
+        }
+        let high = self.output_high_ticks.get(channel).copied().unwrap_or(0);
+        Some((high.min(total) as f64 / total as f64) as f32)
+    }
+
+    /// The level held during the tick that is about to elapse, and the length
+    /// of the window the duty is averaged over (a few PWM periods).
+    fn accumulate_output_duty(&mut self) {
+        let period = u64::from(self.arr & 0xFFFF) + 1;
+        let window = period.saturating_mul(4).clamp(128, 1 << 20);
+        for channel in 0..4 {
+            if !self.output_enabled(channel) {
+                // A disabled or reconfigured channel restarts its measurement
+                // instead of reporting a stale duty.
+                self.output_high_ticks[channel] = 0;
+                self.output_ticks[channel] = 0;
+                continue;
+            }
+            let high = self.output_level(channel) == Some(true);
+            self.output_ticks[channel] += 1;
+            if high {
+                self.output_high_ticks[channel] += 1;
+            }
+            self.wrap_duty_window(channel, window);
+        }
+    }
+
+    /// Accounts for the ticks a coarse step folded together, using the
+    /// configured waveform instead of one sampled instant.
+    fn account_collapsed_ticks(&mut self, ticks: u64) {
+        let period = f64::from(self.arr & 0xFFFF) + 1.0;
+        let window = (self.arr as u64 & 0xFFFF)
+            .saturating_add(1)
+            .saturating_mul(4)
+            .clamp(128, 1 << 20);
+        for channel in 0..4 {
+            if !self.output_enabled(channel) {
+                self.output_high_ticks[channel] = 0;
+                self.output_ticks[channel] = 0;
+                continue;
+            }
+            let duty = f64::from(self.ccr[channel]) / period;
+            let fraction = match self.output_mode(channel) {
+                4 => 0.0,
+                5 => 1.0,
+                6 => duty,
+                7 => 1.0 - duty,
+                _ => {
+                    if self.output_level(channel) == Some(true) {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                }
+            }
+            .clamp(0.0, 1.0);
+            self.output_ticks[channel] += ticks;
+            self.output_high_ticks[channel] += (ticks as f64 * fraction) as u64;
+            self.wrap_duty_window(channel, window);
+        }
+    }
+
+    /// Halves the measurement window once it grows past a few PWM periods, so
+    /// a duty change shows up quickly without dropping the average entirely.
+    fn wrap_duty_window(&mut self, channel: usize, window: u64) {
+        if self.output_ticks[channel] >= window {
+            self.output_ticks[channel] /= 2;
+            self.output_high_ticks[channel] /= 2;
+        }
     }
 
     fn update_event(&mut self, cx: &Ctx, from_software: bool) {
@@ -301,6 +419,8 @@ impl Tim {
     }
 
     fn tick(&mut self, cx: &Ctx) {
+        // The level sampled here was held for the tick that just elapsed.
+        self.accumulate_output_duty();
         let arr = self.arr & 0xFFFF;
         let center = self.cr1 & cr1::CMS != 0;
         let down = self.cr1 & cr1::DIR != 0;
@@ -385,6 +505,7 @@ impl Tim {
             if total / period > 0 {
                 self.update_event(cx, false);
             }
+            self.account_collapsed_ticks(ticks);
         } else {
             for _ in 0..MAX_FINE_TICKS {
                 self.tick(cx);
@@ -579,9 +700,13 @@ impl Tim {
         };
         let tick = clock / (self.psc + 1);
         let mut channels = 0;
+        let mut duties = Vec::new();
         for channel in 0..4 {
             if self.ccer & (1 << (channel * 4)) != 0 {
                 channels += 1;
+            }
+            if let Some(duty) = self.channel_duty(channel) {
+                duties.push(format!("CH{} {:.0}%", channel + 1, duty * 100.0));
             }
         }
         vec![
@@ -605,6 +730,14 @@ impl Tim {
                     "{channels} 个输出（CCR1..4 = {} {} {} {}）",
                     self.ccr[0], self.ccr[1], self.ccr[2], self.ccr[3]
                 ),
+            ),
+            (
+                "输出占空比",
+                if duties.is_empty() {
+                    "—".to_string()
+                } else {
+                    duties.join(" ")
+                },
             ),
         ]
     }
@@ -678,6 +811,82 @@ mod tests {
         tim.advance(&cx, cycles(4));
         assert_eq!(tim.counter(), 4);
         assert_eq!(tim.output_level(0), Some(false), "CNT 4 >= CCR 4");
+    }
+
+    #[test]
+    fn measured_duty_tracks_the_compare_value() {
+        let cx = ctx_8mhz();
+        let mut tim = timer();
+        tim.write_reg(&cx, reg::PSC, AccessWidth::Word, 0).unwrap();
+        tim.write_reg(&cx, reg::ARR, AccessWidth::Word, 9).unwrap();
+        // PWM mode 1 on channel 1, output enabled.
+        tim.write_reg(&cx, reg::CCMR1, AccessWidth::Word, 0b110 << 4)
+            .unwrap();
+        tim.write_reg(&cx, reg::CCER, AccessWidth::Word, cc_enable_bit(0))
+            .unwrap();
+        tim.write_reg(&cx, reg::CCR1, AccessWidth::Word, 3).unwrap();
+        tim.write_reg(&cx, reg::CR1, AccessWidth::Word, cr1::CEN)
+            .unwrap();
+
+        // 1 ms of an 8 MHz counter clock is exactly 1000 periods.
+        tim.advance(&cx, cycles(8_000));
+        let duty = tim.channel_duty(0).expect("the channel drives an output");
+        assert!((duty - 0.3).abs() < 0.02, "measured duty was {duty}");
+
+        // A duty change shows up within a few periods.
+        tim.write_reg(&cx, reg::CCR1, AccessWidth::Word, 8).unwrap();
+        tim.advance(&cx, 20_000_000);
+        let duty = tim.channel_duty(0).expect("the channel drives an output");
+        assert!((duty - 0.8).abs() < 0.03, "measured duty was {duty}");
+    }
+
+    #[test]
+    fn a_disabled_channel_reports_no_duty() {
+        let cx = ctx_8mhz();
+        let mut tim = timer();
+        tim.write_reg(&cx, reg::ARR, AccessWidth::Word, 9).unwrap();
+        tim.write_reg(&cx, reg::CCMR1, AccessWidth::Word, 0b110 << 4)
+            .unwrap();
+        tim.write_reg(&cx, reg::CR1, AccessWidth::Word, cr1::CEN)
+            .unwrap();
+        tim.advance(&cx, cycles(100));
+        assert_eq!(tim.channel_duty(0), None, "CCxE is still cleared");
+    }
+
+    #[test]
+    fn the_advanced_timer_needs_moe_for_its_output() {
+        let cx = ctx_8mhz();
+        let mut tim = Tim::new(0, lines::TIM1_UP, lines::TIM1_CC, true);
+        tim.write_reg(&cx, reg::ARR, AccessWidth::Word, 9).unwrap();
+        tim.write_reg(&cx, reg::CCMR1, AccessWidth::Word, 0b110 << 4)
+            .unwrap();
+        tim.write_reg(&cx, reg::CCER, AccessWidth::Word, cc_enable_bit(0))
+            .unwrap();
+        assert!(!tim.output_enabled(0));
+        tim.write_reg(&cx, reg::BDTR, AccessWidth::Word, bdtr::MOE)
+            .unwrap();
+        assert!(tim.output_enabled(0));
+    }
+
+    #[test]
+    fn down_counting_pwm_inverts_the_reference() {
+        let cx = ctx_8mhz();
+        let mut tim = timer();
+        tim.write_reg(&cx, reg::ARR, AccessWidth::Word, 9).unwrap();
+        tim.write_reg(&cx, reg::CCMR1, AccessWidth::Word, 0b110 << 4)
+            .unwrap();
+        tim.write_reg(&cx, reg::CCER, AccessWidth::Word, cc_enable_bit(0))
+            .unwrap();
+        tim.write_reg(&cx, reg::CCR1, AccessWidth::Word, 4).unwrap();
+        tim.write_reg(&cx, reg::CR1, AccessWidth::Word, cr1::CEN | cr1::DIR)
+            .unwrap();
+
+        tim.write_reg(&cx, reg::CNT, AccessWidth::Word, 9).unwrap();
+        assert_eq!(tim.output_level(0), Some(false), "CNT 9 > CCR 4");
+        tim.write_reg(&cx, reg::CNT, AccessWidth::Word, 5).unwrap();
+        assert_eq!(tim.output_level(0), Some(false), "CNT 5 > CCR 4");
+        tim.write_reg(&cx, reg::CNT, AccessWidth::Word, 4).unwrap();
+        assert_eq!(tim.output_level(0), Some(true), "CNT 4 <= CCR 4");
     }
 
     #[test]

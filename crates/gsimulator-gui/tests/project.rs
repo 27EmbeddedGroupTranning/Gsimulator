@@ -21,12 +21,14 @@ fn temp_path(name: &str) -> std::path::PathBuf {
 fn an_app_opens_a_saved_schematic_over_the_empty_canvas() {
     let ctx = egui::Context::default();
     let mut app = App::with_context(&ctx, None);
-    assert!(
-        app.board().devices().is_empty(),
-        "the canvas starts empty (no demo circuit)"
-    );
+    // A new project only carries the seed parts; the demo adds the rest.
+    let seed_devices = app.board().devices().len();
 
     let saved = Board::demo();
+    assert!(
+        saved.devices().len() > seed_devices,
+        "the demo circuit must add parts on top of a new project"
+    );
     let path = temp_path("open");
     project::save(&path, &saved).expect("the demo board is writable");
     app.open_project_from(&path).expect("the file reads back");
@@ -70,6 +72,7 @@ fn saving_and_opening_the_app_keeps_the_drawing() {
 fn a_broken_file_leaves_the_schematic_alone() {
     let ctx = egui::Context::default();
     let mut app = App::with_context(&ctx, None);
+    let before = app.board().devices().len();
     let path = temp_path("broken");
     std::fs::write(&path, "这不是工程文件\n").expect("scratch file");
     let error = app
@@ -80,8 +83,9 @@ fn a_broken_file_leaves_the_schematic_alone() {
         error.contains("第 1 行"),
         "the message must point at the line: {error}"
     );
-    assert!(
-        app.board().devices().is_empty(),
+    assert_eq!(
+        app.board().devices().len(),
+        before,
         "nothing is loaded from a broken file"
     );
 }

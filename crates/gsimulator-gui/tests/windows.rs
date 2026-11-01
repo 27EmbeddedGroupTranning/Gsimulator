@@ -40,6 +40,7 @@ fn the_peripheral_browser_lists_every_block_and_the_placed_devices() {
     let mut board = Board::new();
     board.add_matrix(egui::Pos2::new(600.0, 100.0));
     board.add_can(egui::Pos2::new(600.0, 300.0));
+    board.add_motor(egui::Pos2::new(800.0, 300.0));
     board.fill_snapshot(&mut snapshot, &PinLevels::default());
     assert!(
         snapshot
@@ -54,6 +55,13 @@ fn the_peripheral_browser_lists_every_block_and_the_placed_devices() {
             .iter()
             .any(|status| status.kind.contains("CAN 收发器")),
         "the CAN transceiver has no status entry"
+    );
+    assert!(
+        snapshot
+            .peripherals
+            .iter()
+            .any(|status| status.kind.contains("CAN 电机")),
+        "the CAN motor has no status entry"
     );
 
     let mut browser = PeripheralBrowser::new();
@@ -231,22 +239,26 @@ fn the_scope_window_captions_every_bit_of_a_captured_frame() {
         }
     }
     board.fill_snapshot(&mut snapshot, &PinLevels::default());
-    assert_eq!(snapshot.scopes[0].frames.len(), 1, "the probe decoded a frame");
+    assert_eq!(
+        snapshot.scopes[0].frames.len(),
+        1,
+        "the probe decoded a frame"
+    );
 
     let mut window = ScopeWindow::default();
     window.open = true;
     let ctx = egui::Context::default();
-    // Without this the window fades in from zero opacity and paints
-    // `Shape::Noop` placeholders on the first frame.
-    ctx.style_mut(|style| style.animation_time = 0.0);
+    // A window fades in, so the very first pass paints placeholders only.
+    let _ = ctx.run(raw_input(), |ctx| {
+        window.show(ctx, &snapshot);
+    });
     let output = ctx.run(raw_input(), |ctx| {
         window.show(ctx, &snapshot);
     });
     let texts = painted_text(&output);
-    println!("{texts:?}");
     assert!(
         texts.iter().any(|text| text == "CAN 帧解码"),
-        "the bit decode area is missing"
+        "the bit decode area is missing: {texts:?}"
     );
     for caption in ["0·SOF", "12·RTR", "19·数据0", "EOF0"] {
         assert!(

@@ -292,6 +292,7 @@ fn thumbnail(ui: &mut egui::Ui, kind: DeviceKind) {
         DeviceKind::HseCrystal | DeviceKind::LseCrystal => Color32::from_rgb(190, 150, 255),
         DeviceKind::Resistor => Color32::from_rgb(210, 170, 120),
         DeviceKind::Scope => Color32::from_rgb(120, 230, 220),
+        DeviceKind::Motor => Color32::from_rgb(110, 205, 165),
         DeviceKind::Junction => Color32::from_rgb(120, 196, 240),
     };
     match kind {
@@ -522,6 +523,14 @@ fn thumbnail(ui: &mut egui::Ui, kind: DeviceKind) {
                 ));
             }
             painter.add(Shape::line(points, stroke));
+        }
+        DeviceKind::Motor => {
+            // A body with an `M` and a mark that follows the shaft.
+            let center = body.center();
+            let radius = (body.height() * 0.3).max(4.0);
+            painter.circle_stroke(center, radius, Stroke::new(1.4, accent));
+            let tip = Pos2::new(center.x + radius * 0.8, center.y - radius * 0.6);
+            painter.line_segment([center, tip], Stroke::new(1.6, accent));
         }
         DeviceKind::Junction => {
             // A tap point: the dot that sits on a wire, with a short lead.

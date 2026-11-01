@@ -1,0 +1,46 @@
+{
+    // Cortex-Debug 调试配置：目标不是真实 ST-Link，而是 Gsimulator 的虚拟 ST-Link。
+    //
+    // 推荐用法（断点会冻结画布，看到的就是正在跑的那份仿真）：
+    //   1. cargo run -p gsimulator-gui
+    //   2. GUI 里「📂 打开工程…」选 docs/canspi-heart.gsim，再「📂 加载 ELF…」选
+    //      firmware/CANSPI/build/Debug/CANSPI.elf，然后「运行」
+    //   3. GUI 工具栏「🐞 调试服务」→ 勾选「开启调试服务」，端口 3333
+    //   4. 这里 F5 选「Gsimulator GUI：附加到图形前端」
+    //
+    // 命令行方式（另起一个独立的仿真，和 GUI 无关）用第二条配置。
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Gsimulator GUI：附加到图形前端",
+            "type": "cortex-debug",
+            "request": "attach",
+            "servertype": "external",
+            "gdbTarget": "127.0.0.1:3333",
+            "cwd": "${workspaceFolder}",
+            "executable": "${workspaceFolder}/firmware/CANSPI/build/Debug/CANSPI.elf",
+            "toolchainPrefix": "arm-none-eabi",
+            // GUI 里的固件早就跑过 main 了，附加后先复位再停在 main，
+            // 和 launch 配置的 runToEntryPoint 效果一样。
+            "postAttachCommands": [
+                "monitor reset halt",
+                "break main",
+                "continue"
+            ]
+        },
+        {
+            "name": "Gsimulator CLI：自动起服务器",
+            "type": "cortex-debug",
+            "request": "launch",
+            // external = 服务器由 preLaunchTask 里的后台任务拉起，Cortex-Debug 只连 gdbTarget。
+            "servertype": "external",
+            "gdbTarget": "127.0.0.1:3333",
+            "preLaunchTask": "gsim: 启动虚拟 ST-Link",
+            "cwd": "${workspaceFolder}",
+            "executable": "${workspaceFolder}/firmware/CANSPI/build/Debug/CANSPI.elf",
+            "toolchainPrefix": "arm-none-eabi",
+            // 默认流程是 target-download（load）→ monitor reset halt，两步虚拟 ST-Link 都实现了。
+            "runToEntryPoint": "main"
+        }
+    ]
+}

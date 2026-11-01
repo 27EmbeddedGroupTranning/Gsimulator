@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use crate::connection::{Connection, Poll, Waiting};
 use crate::description;
 use crate::rsp;
-use crate::target::{PointKind, Stop, Target};
+use crate::target::{DebugTarget, PointKind, Stop, Target};
 
 /// Instructions executed between two polls of the connection.
 const RESUME_SLICE: u64 = 100_000;
@@ -52,19 +52,33 @@ impl Default for ServerOptions {
 }
 
 /// What to send back for one request.
-enum Reply {
+///
+/// The variants that need the target to execute (`Resume`, `Step`) are handed
+/// back to the caller instead of being served here, so the same protocol code
+/// runs behind a blocking socket loop (the command line) and inside a UI frame
+/// (the graphical front end).
+pub enum Reply {
     /// Nothing: the request was optional or unknown.
     None,
     /// A payload.
     Text(String),
+    /// Console output of a `monitor` command; each line goes out as an `O`
+    /// packet, followed by `OK`.
+    Lines(Vec<String>),
     /// The session is over.
     Close,
+    /// Let the target run until it stops, then report the stop.
+    Resume,
+    /// Execute one instruction and report the stop.
+    Step,
 }
 
 /// The GDB server itself.
 pub struct GdbServer {
     options: ServerOptions,
     memory_map: String,
+    /// `false` once the peer sent `QStartNoAckMode`.
+    acknowledge: bool,
 }
 
 impl GdbServer {
@@ -73,7 +87,13 @@ impl GdbServer {
         GdbServer {
             options,
             memory_map: description::memory_map(),
+            acknowledge: true,
         }
+    }
+
+    /// `false` after the peer asked for a session without acknowledgements.
+    pub fn acknowledge(&self) -> bool {
+        self.acknowledge
     }
 
     /// Binds the listening socket described by `options`.
@@ -132,7 +152,8 @@ impl GdbServer {
                     if self.options.verbose {
                         eprintln!("[gsim-gdb] <- {}", preview(&payload));
                     }
-                    let reply = self.dispatch(connection, target, &payload)?;
+                    let reply = self.dispatch(target, &payload);
+                    connection.set_acknowledge(self.acknowledge);
                     match reply {
                         Reply::None => {
                             if self.options.verbose {
@@ -140,127 +161,132 @@ impl GdbServer {
                             }
                         }
                         Reply::Text(text) => {
-                            if self.options.verbose {
-                                eprintln!("[gsim-gdb] -> {}", preview(text.as_bytes()));
-                            }
+                            self.note(&format!("-> {}", preview(text.as_bytes())));
                             connection.send(&text)?;
+                        }
+                        Reply::Lines(lines) => {
+                            for line in lines {
+                                let line = format!("{line}\n");
+                                connection.send(&format!("O{}", rsp::to_hex(line.as_bytes())))?;
+                            }
+                            connection.send("OK")?;
                         }
                         Reply::Close => {
                             connection.close();
                             return Ok(());
                         }
+                        Reply::Resume => {
+                            target.resume();
+                            match self.run_until_stop(connection, target)? {
+                                Some(reply) => connection.send(&reply)?,
+                                None => return Ok(()),
+                            }
+                        }
+                        Reply::Step => {
+                            target.resume();
+                            let reply = match target.step() {
+                                Ok(stop) => self.stop_reply(stop.as_ref()),
+                                Err(message) => {
+                                    eprintln!("error: {message}");
+                                    target.halt();
+                                    fault_reply()
+                                }
+                            };
+                            connection.send(&reply)?;
+                        }
                     }
                 }
             }
         }
     }
 
-    fn dispatch(
-        &mut self,
-        connection: &mut Connection,
-        target: &mut Target,
-        payload: &[u8],
-    ) -> io::Result<Reply> {
+    /// Serves one packet without touching the socket, so a front end that owns
+    /// the device on its UI thread can reuse the whole protocol.
+    pub fn dispatch(&mut self, target: &mut dyn DebugTarget, payload: &[u8]) -> Reply {
         // Packets with a binary payload are handled before the text paths.
         if let Some(rest) = payload.strip_prefix(b"X".as_slice()) {
-            return Ok(self.binary_write(target, rest));
+            return self.binary_write(target, rest);
         }
         if let Some(rest) = payload.strip_prefix(b"vFlashWrite:".as_slice()) {
-            return Ok(self.flash_write(target, rest));
+            return self.flash_write(target, rest);
         }
 
         let text = String::from_utf8_lossy(payload);
         let text = text.as_ref();
         let Some(head) = text.as_bytes().first().copied() else {
-            return Ok(Reply::None);
+            return Reply::None;
         };
 
         match head {
-            b'?' => Ok(Reply::Text(self.stop_reply(None))),
-            b'g' if text.len() == 1 => Ok(Reply::Text(self.read_registers(target))),
-            b'G' => Ok(Reply::Text(self.write_registers(target, &text[1..]))),
-            b'p' => Ok(Reply::Text(self.read_register(target, &text[1..]))),
-            b'P' => Ok(Reply::Text(self.write_register(target, &text[1..]))),
-            b'm' => Ok(Reply::Text(self.read_memory(target, &text[1..]))),
-            b'M' => Ok(Reply::Text(self.write_memory(target, &text[1..]))),
-            b'c' | b'C' => self.continue_target(connection, target),
-            b's' | b'S' => self.step_target(target),
-            b'Z' => Ok(Reply::Text(self.insert_point(target, &text[1..]))),
-            b'z' => Ok(Reply::Text(self.remove_point(target, &text[1..]))),
-            b'k' => Ok(Reply::Close),
+            b'?' => Reply::Text(self.stop_reply(None)),
+            b'g' if text.len() == 1 => Reply::Text(self.read_registers(target)),
+            b'G' => Reply::Text(self.write_registers(target, &text[1..])),
+            b'p' => Reply::Text(self.read_register(target, &text[1..])),
+            b'P' => Reply::Text(self.write_register(target, &text[1..])),
+            b'm' => Reply::Text(self.read_memory(target, &text[1..])),
+            b'M' => Reply::Text(self.write_memory(target, &text[1..])),
+            b'c' | b'C' => Reply::Resume,
+            b's' | b'S' => Reply::Step,
+            b'Z' => Reply::Text(self.insert_point(target, &text[1..])),
+            b'z' => Reply::Text(self.remove_point(target, &text[1..])),
+            b'k' => Reply::Close,
             b'D' => {
                 target.halt();
-                Ok(Reply::Text("OK".to_string()))
+                Reply::Text("OK".to_string())
             }
-            b'!' | b'H' | b'T' => Ok(Reply::Text("OK".to_string())),
+            b'!' | b'H' | b'T' => Reply::Text("OK".to_string()),
             b'R' => {
                 target.halt();
                 match target.hard_reset() {
-                    Ok(()) => Ok(Reply::Text("OK".to_string())),
+                    Ok(()) => Reply::Text("OK".to_string()),
                     Err(message) => {
                         self.note(&message);
-                        Ok(Reply::Text("E01".to_string()))
+                        Reply::Text("E01".to_string())
                     }
                 }
             }
-            b'q' => self.query(connection, target, text),
-            b'Q' => Ok(self.set_query(connection, text)),
-            b'v' => self.extended(connection, target, text),
-            _ => Ok(Reply::None),
+            b'q' => self.query(target, text),
+            b'Q' => self.set_query(text),
+            b'v' => self.extended(target, text),
+            _ => Reply::None,
         }
     }
 
     // ---------------------------------------------------------------- resume
 
-    fn continue_target(
+    /// Runs the target in slices, polling the socket in between so a control-C
+    /// stops the firmware. `None` means the peer hung up.
+    fn run_until_stop(
         &mut self,
         connection: &mut Connection,
         target: &mut Target,
-    ) -> io::Result<Reply> {
-        target.resume();
+    ) -> io::Result<Option<String>> {
         loop {
             match target.run(RESUME_SLICE) {
                 Ok(Some(stop)) => {
                     self.note(&format!("stopped: {stop:?}"));
-                    return Ok(Reply::Text(self.stop_reply(Some(&stop))));
+                    return Ok(Some(self.stop_reply(Some(&stop))));
                 }
                 Ok(None) => match connection.poll()? {
                     Poll::Idle => {}
                     Poll::Interrupt => {
                         target.halt();
                         self.note("stopped: control-C");
-                        return Ok(Reply::Text(self.stop_reply(Some(&Stop::Halt))));
+                        return Ok(Some(self.stop_reply(Some(&Stop::Halt))));
                     }
-                    Poll::Closed => return Ok(Reply::Close),
+                    Poll::Closed => return Ok(None),
                 },
                 Err(message) => {
                     eprintln!("error: {message}");
                     target.halt();
-                    return Ok(Reply::Text(format!(
-                        "T{:02x}thread:1;",
-                        crate::target::Signal::Segv.number()
-                    )));
+                    return Ok(Some(fault_reply()));
                 }
             }
         }
     }
 
-    fn step_target(&mut self, target: &mut Target) -> io::Result<Reply> {
-        target.resume();
-        match target.step() {
-            Ok(stop) => Ok(Reply::Text(self.stop_reply(stop.as_ref()))),
-            Err(message) => {
-                eprintln!("error: {message}");
-                target.halt();
-                Ok(Reply::Text(format!(
-                    "T{:02x}thread:1;",
-                    crate::target::Signal::Segv.number()
-                )))
-            }
-        }
-    }
-
-    fn stop_reply(&self, stop: Option<&Stop>) -> String {
+    /// `T05`-style stop reply for a target that stopped.
+    pub fn stop_reply(&self, stop: Option<&Stop>) -> String {
         let signal = stop.map_or(5, |stop| stop.signal().number());
         let mut reply = format!("T{signal:02x}thread:1;");
         match stop {
@@ -278,7 +304,7 @@ impl GdbServer {
 
     // ------------------------------------------------------------- registers
 
-    fn read_registers(&self, target: &Target) -> String {
+    fn read_registers(&self, target: &mut dyn DebugTarget) -> String {
         target
             .read_registers()
             .iter()
@@ -286,7 +312,7 @@ impl GdbServer {
             .collect()
     }
 
-    fn write_registers(&mut self, target: &mut Target, payload: &str) -> String {
+    fn write_registers(&mut self, target: &mut dyn DebugTarget, payload: &str) -> String {
         let Some(values) = rsp::words_from_hex(payload.as_bytes()) else {
             return "E01".to_string();
         };
@@ -297,7 +323,7 @@ impl GdbServer {
         "OK".to_string()
     }
 
-    fn read_register(&self, target: &Target, payload: &str) -> String {
+    fn read_register(&self, target: &mut dyn DebugTarget, payload: &str) -> String {
         let Some(index) = rsp::parse_number(payload) else {
             return "E01".to_string();
         };
@@ -307,7 +333,7 @@ impl GdbServer {
         rsp::word_to_hex(target.read_register(index as usize))
     }
 
-    fn write_register(&mut self, target: &mut Target, payload: &str) -> String {
+    fn write_register(&mut self, target: &mut dyn DebugTarget, payload: &str) -> String {
         let Some((index, value)) = payload.split_once('=') else {
             return "E01".to_string();
         };
@@ -329,7 +355,7 @@ impl GdbServer {
 
     // ---------------------------------------------------------------- memory
 
-    fn read_memory(&mut self, target: &Target, payload: &str) -> String {
+    fn read_memory(&mut self, target: &mut dyn DebugTarget, payload: &str) -> String {
         let Some((address, length)) = payload.split_once(',') else {
             return "E01".to_string();
         };
@@ -347,7 +373,7 @@ impl GdbServer {
         }
     }
 
-    fn write_memory(&mut self, target: &mut Target, payload: &str) -> String {
+    fn write_memory(&mut self, target: &mut dyn DebugTarget, payload: &str) -> String {
         let Some((header, data)) = payload.split_once(':') else {
             return "E01".to_string();
         };
@@ -373,7 +399,7 @@ impl GdbServer {
         }
     }
 
-    fn binary_write(&mut self, target: &mut Target, payload: &[u8]) -> Reply {
+    fn binary_write(&mut self, target: &mut dyn DebugTarget, payload: &[u8]) -> Reply {
         let Some(colon) = payload.iter().position(|byte| *byte == b':') else {
             return Reply::Text("E01".to_string());
         };
@@ -399,7 +425,7 @@ impl GdbServer {
         }
     }
 
-    fn flash_write(&mut self, target: &mut Target, payload: &[u8]) -> Reply {
+    fn flash_write(&mut self, target: &mut dyn DebugTarget, payload: &[u8]) -> Reply {
         let Some(colon) = payload.iter().position(|byte| *byte == b':') else {
             return Reply::Text("E01".to_string());
         };
@@ -418,7 +444,7 @@ impl GdbServer {
 
     // ---------------------------------------------------------- breakpoints
 
-    fn insert_point(&mut self, target: &mut Target, payload: &str) -> String {
+    fn insert_point(&mut self, target: &mut dyn DebugTarget, payload: &str) -> String {
         let Some((kind, address, size)) = parse_point(payload) else {
             return "E01".to_string();
         };
@@ -437,7 +463,7 @@ impl GdbServer {
         }
     }
 
-    fn remove_point(&mut self, target: &mut Target, payload: &str) -> String {
+    fn remove_point(&mut self, target: &mut dyn DebugTarget, payload: &str) -> String {
         let Some((kind, address, size)) = parse_point(payload) else {
             return "E01".to_string();
         };
@@ -458,118 +484,109 @@ impl GdbServer {
 
     // -------------------------------------------------------------- queries
 
-    fn query(
-        &mut self,
-        connection: &mut Connection,
-        target: &mut Target,
-        text: &str,
-    ) -> io::Result<Reply> {
+    fn query(&mut self, target: &mut dyn DebugTarget, text: &str) -> Reply {
         if text.starts_with("qSupported") {
-            return Ok(Reply::Text(format!(
+            return Reply::Text(format!(
                 "PacketSize={PACKET_SIZE:x};qXfer:features:read+;\
                  qXfer:memory-map:read+;qXfer:threads:read+;QStartNoAckMode+;\
                  vContSupported+;swbreak+;hwbreak+"
-            )));
+            ));
         }
         if let Some(request) = text.strip_prefix("qXfer:") {
-            return Ok(Reply::Text(self.xfer(request)));
+            return Reply::Text(self.xfer(request));
         }
         if let Some(command) = text.strip_prefix("qRcmd,") {
             return match rsp::from_hex(command.as_bytes()) {
-                Some(bytes) => self.monitor(connection, target, &String::from_utf8_lossy(&bytes)),
-                None => Ok(Reply::Text("E01".to_string())),
+                Some(bytes) => self.monitor(target, &String::from_utf8_lossy(&bytes)),
+                None => Reply::Text("E01".to_string()),
             };
         }
         if text.starts_with("qAttached") {
-            return Ok(Reply::Text("1".to_string()));
+            return Reply::Text("1".to_string());
         }
         if text.starts_with("qThreadExtraInfo") {
-            return Ok(Reply::Text(rsp::to_hex(b"Cortex-M3")));
+            return Reply::Text(rsp::to_hex(b"Cortex-M3"));
         }
         if text.starts_with("qSymbol") {
-            return Ok(Reply::Text("OK".to_string()));
+            return Reply::Text("OK".to_string());
         }
-        Ok(match text {
+        match text {
             "qC" => Reply::Text("QC1".to_string()),
             "qfThreadInfo" => Reply::Text("m1".to_string()),
             "qsThreadInfo" => Reply::Text("l".to_string()),
             "qOffsets" => Reply::Text("Text=0;Data=0;Bss=0".to_string()),
             "qTStatus" | "qTfV" | "qTsV" => Reply::Text(String::new()),
             _ => Reply::None,
-        })
+        }
     }
 
-    fn set_query(&mut self, connection: &mut Connection, text: &str) -> Reply {
+    fn set_query(&mut self, text: &str) -> Reply {
         if text.starts_with("QStartNoAckMode") {
-            // The reply is sent with acknowledgements still on; the mode starts
-            // with the next packet.
-            connection.set_acknowledge(false);
+            // The mode starts with the next packet; the caller applies
+            // [`GdbServer::acknowledge`] to the connection right after us.
+            self.acknowledge = false;
             self.note("no-acknowledgement mode");
             return Reply::Text("OK".to_string());
         }
         Reply::None
     }
 
-    fn extended(
-        &mut self,
-        connection: &mut Connection,
-        target: &mut Target,
-        text: &str,
-    ) -> io::Result<Reply> {
+    fn extended(&mut self, target: &mut dyn DebugTarget, text: &str) -> Reply {
         if text == "vMustReplyEmpty" {
-            return Ok(Reply::Text(String::new()));
+            return Reply::Text(String::new());
         }
         if text == "vCont?" {
-            return Ok(Reply::Text("vCont;c;C;s;S;t".to_string()));
+            return Reply::Text("vCont;c;C;s;S;t".to_string());
         }
         if let Some(action) = text.strip_prefix("vCont;") {
             let action = action.split(':').next().unwrap_or("");
             return match action {
-                "c" => self.continue_target(connection, target),
-                "s" => self.step_target(target),
+                "c" | "C" => Reply::Resume,
+                "s" | "S" => Reply::Step,
                 "t" => {
                     target.halt();
-                    Ok(Reply::Text(self.stop_reply(Some(&Stop::Halt))))
+                    Reply::Text(self.stop_reply(Some(&Stop::Halt)))
                 }
-                _ => Ok(Reply::None),
+                _ => Reply::None,
             };
         }
         if let Some(range) = text.strip_prefix("vFlashErase:") {
             let Some((address, length)) = range.split_once(',') else {
-                return Ok(Reply::Text("E01".to_string()));
+                return Reply::Text("E01".to_string());
             };
             let (Some(address), Some(length)) =
                 (rsp::parse_number(address), rsp::parse_number(length))
             else {
-                return Ok(Reply::Text("E01".to_string()));
+                return Reply::Text("E01".to_string());
             };
-            return Ok(match target.flash_erase(address as u32, length as u32) {
+            return match target.flash_erase(address as u32, length as u32) {
                 Ok(()) => Reply::Text("OK".to_string()),
                 Err(message) => {
                     eprintln!("error: {message}");
                     Reply::Text("E01".to_string())
                 }
-            });
+            };
         }
         if text.starts_with("vFlashDone") {
-            return Ok(Reply::Text("OK".to_string()));
+            return Reply::Text("OK".to_string());
         }
         if text.starts_with("vKill") {
             // GDB kills the inferior before `run`; keeping the connection open
             // lets it start the firmware again without reconnecting.
             self.note("inferior killed, connection kept open");
-            return Ok(Reply::Text("OK".to_string()));
+            return Reply::Text("OK".to_string());
         }
         if text.starts_with("vRun") {
-            return Ok(match target.hard_reset() {
+            target.resume();
+            return match target.hard_reset() {
                 Ok(()) => Reply::Text(self.stop_reply(None)),
                 Err(message) => {
                     self.note(&message);
                     Reply::Text("E01".to_string())
                 }
-            });
+            };
         }
-        Ok(Reply::None)
+        Reply::None
     }
 
     /// Serves `qXfer` reads: only `read` is supported, in `offset,length` chunks.
@@ -603,18 +620,14 @@ impl GdbServer {
         format!("{more}{}", String::from_utf8_lossy(&data[start..end]))
     }
 
-    fn monitor(
-        &mut self,
-        connection: &mut Connection,
-        target: &mut Target,
-        command: &str,
-    ) -> io::Result<Reply> {
-        let output = target.monitor(command);
-        for line in output.lines() {
-            let line = format!("{line}\n");
-            connection.send(&format!("O{}", rsp::to_hex(line.as_bytes())))?;
-        }
-        Ok(Reply::Text("OK".to_string()))
+    fn monitor(&mut self, target: &mut dyn DebugTarget, command: &str) -> Reply {
+        Reply::Lines(
+            target
+                .monitor(command)
+                .lines()
+                .map(str::to_string)
+                .collect::<Vec<_>>(),
+        )
     }
 
     fn note(&self, message: &str) {
@@ -622,6 +635,11 @@ impl GdbServer {
             eprintln!("[gsim-gdb] {message}");
         }
     }
+}
+
+/// Stop reply for a target that raised an error while it was resumed.
+fn fault_reply() -> String {
+    format!("T{:02x}thread:1;", crate::target::Signal::Segv.number())
 }
 
 /// Shortens a payload for the verbose log and escapes control bytes.

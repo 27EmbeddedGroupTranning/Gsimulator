@@ -193,15 +193,27 @@ cargo run -p gsimulator-gui              # 手动确认：能放置、能连线�
 的设备操作（寄存器、内存、断点、用 FLASH 控制器编程），`server.rs` 是 RSP 分发，`connection.rs`
 是带缓冲的 socket，`gsimulator gdb` 只是薄薄一层 CLI。
 
+协议层与传输层是分开的，两处共用同一份分发：
+
+* `DebugTarget`（`target.rs`）描述“探针能对设备做什么”。`Target` 为 CLI 实现它（自带 `Soc`/`Cpu`），
+  图形前端为 `Simulation` 实现它（`crates/gsimulator-gui/src/debugger.rs` 的 `CoreTarget`）。
+* `GdbServer::dispatch(target, payload) -> Reply` 不碰 socket；`Reply::Resume` / `Reply::Step`
+  把“要不要跑”交回调用方：CLI 在 `session()` 里阻塞着跑到停止，GUI 只在帧循环里推进仿真，
+  所以**断点停的是画布上那份仿真**。
+* GUI 的 `DebugService` 用非阻塞 `Connection`（`poll_wait`、`set_non_blocking`），
+  每帧最多处理 `PACKETS_PER_FRAME` 个包；`GSIM_DEBUG_PACKETS=1` 会把收发的包打到 stderr。
+
 新增一个 RSP 请求的流程：
 
 1. 在 `server.rs::dispatch`（或 `query` / `extended`）里加分支；未知包返回 `Reply::None`
    （不回包），GDB 会当作“不支持”继续跑，不要回 `E`。
-2. 需要新的设备能力时加到 `target.rs`，**不要**在 `server.rs` 里直接摸 `Soc`：
-   flash 编程必须走 `FLASH_KEYR` / `CR` / `AR` / `SR`（照 `Target::flash_erase` / `flash_write` 写），
+2. 需要新的设备能力时加到 `target.rs` 的 `DebugTarget` 上（CLI 的 `Target` 用控制器寄存器实现，
+   GUI 的 `CoreTarget` 用 `Soc` 的公共接口实现），**不要**在 `server.rs` 里直接摸 `Soc`：
+   flash 编程在 CLI 里必须走 `FLASH_KEYR` / `CR` / `AR` / `SR`（照 `Target::flash_erase` / `flash_write` 写），
    这样固件、GDB、以后可能加的其它传输层看到的是同一份控制器状态。
 3. 在 `tests/gdb_session.rs` 里加一条真实 socket 的用例（客户端就是文件顶部的 `Client`）；
    带二进制载荷的包（`X`、`vFlashWrite`）用 `send_bytes` 发。
+   GUI 那份服务在 `crates/gsimulator-gui/tests/debug_service.rs` 里测（含一条跑真实 `gdb` 的用例）。
 4. `tests/real_gdb.rs` 会用真实的 `arm-none-eabi-gdb` 跑 `load` / `break` / `run` / `step`，
    机器上没有交叉工具链时自动跳过。
 

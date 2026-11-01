@@ -480,7 +480,7 @@ impl Schematic {
         self.paint_grid(&painter, origin, &response.rect);
         self.paint_wires(&painter, origin, board, state);
         for device in board.devices() {
-            self.paint_device(&painter, origin, device, state.led_lit(device.id));
+            self.paint_device(&painter, origin, device, state.led_brightness(device.id));
         }
         self.paint_mcu(&painter, origin, levels, hover_pin);
 
@@ -1267,7 +1267,7 @@ impl Schematic {
         painter: &egui::Painter,
         origin: Pos2,
         device: &crate::board::Device,
-        lit: bool,
+        brightness: f32,
     ) {
         let rect = Rect::from_min_max(
             self.to_screen(device.rect().min, origin),
@@ -1297,8 +1297,11 @@ impl Schematic {
             // Keep the bus parts in the colour they have in the library.
             DeviceKind::Can => Color32::from_rgb(245, 200, 60),
             DeviceKind::Matrix => Color32::from_rgb(70, 200, 255),
+            DeviceKind::Motor => Color32::from_rgb(110, 205, 165),
             _ => device.accent.color32(),
         };
+        let brightness = brightness.clamp(0.0, 1.0);
+        let lit = brightness > 0.0;
         if device.kind.is_power() {
             self.paint_power_symbol(painter, rect, device.kind, selected);
         } else {
@@ -1308,10 +1311,21 @@ impl Schematic {
                 Color32::from_rgb(38, 42, 50)
             };
             if lit {
-                // Soft halo so a lit LED reads as "emitting" at any zoom level.
-                let glow = Color32::from_rgba_unmultiplied(base.r(), base.g(), base.b(), 26);
+                // Soft halo so a lit LED reads as "emitting" at any zoom level;
+                // its strength follows the PWM duty of a dimmed channel.
+                let glow = Color32::from_rgba_unmultiplied(
+                    base.r(),
+                    base.g(),
+                    base.b(),
+                    (26.0 * brightness) as u8,
+                );
                 painter.circle_filled(rect.center(), rect.width() * 0.42, glow);
-                let inner = Color32::from_rgba_unmultiplied(base.r(), base.g(), base.b(), 40);
+                let inner = Color32::from_rgba_unmultiplied(
+                    base.r(),
+                    base.g(),
+                    base.b(),
+                    (40.0 * brightness) as u8,
+                );
                 painter.circle_filled(rect.center(), rect.width() * 0.30, inner);
             }
             painter.rect_filled(rect, 7.0 * self.zoom, body);
@@ -1330,7 +1344,7 @@ impl Schematic {
             );
 
             match device.kind {
-                DeviceKind::Led => self.paint_led_symbol(painter, rect, base, lit),
+                DeviceKind::Led => self.paint_led_symbol(painter, rect, base, brightness),
                 DeviceKind::Uart => self.paint_uart_symbol(painter, rect, base, device),
                 DeviceKind::Encoder => self.paint_encoder_symbol(painter, rect, base, device),
                 DeviceKind::Can => self.paint_can_symbol(painter, rect, base, device),
@@ -1340,6 +1354,7 @@ impl Schematic {
                 }
                 DeviceKind::Resistor => self.paint_resistor_symbol(painter, rect, base, device),
                 DeviceKind::Scope => self.paint_scope_symbol(painter, rect, base, device),
+                DeviceKind::Motor => self.paint_motor_symbol(painter, rect, base, device),
                 DeviceKind::Vcc | DeviceKind::Gnd | DeviceKind::Junction => {}
             }
         }
@@ -1470,11 +1485,19 @@ impl Schematic {
     }
 
     /// Triangle, bar and emission arrows.
-    fn paint_led_symbol(&self, painter: &egui::Painter, rect: Rect, base: Color32, lit: bool) {
+    fn paint_led_symbol(
+        &self,
+        painter: &egui::Painter,
+        rect: Rect,
+        base: Color32,
+        brightness: f32,
+    ) {
         let center = rect.center();
         let s = (rect.height() * 0.22).max(5.0);
-        let fill = if lit {
-            base
+        // A PWM dimmed LED keeps its colour but drops towards the dark body,
+        // the way a real diode looks at a lower duty cycle.
+        let fill = if brightness > 0.0 {
+            base.gamma_multiply(0.35 + 0.65 * brightness.clamp(0.0, 1.0))
         } else {
             Color32::from_rgb(70, 76, 88)
         };
@@ -1621,6 +1644,57 @@ impl Schematic {
             format!("{}", encoder.detents()),
             self.font(8.5),
             COLOR_DIM,
+        );
+    }
+
+    /// Motor body with a mark that follows the shaft, plus its speed.
+    fn paint_motor_symbol(
+        &self,
+        painter: &egui::Painter,
+        rect: Rect,
+        base: Color32,
+        device: &crate::board::Device,
+    ) {
+        let Some(motor) = device.hardware.motor() else {
+            return;
+        };
+        let motor = motor.borrow();
+        let center = Pos2::new(rect.center().x, rect.center().y - 4.0 * self.zoom);
+        let radius = (rect.height() * 0.26).max(8.0);
+        let spinning = motor.spin() != gsim_devices::Spin::Stopped;
+        painter.circle_filled(
+            center,
+            radius,
+            if spinning {
+                base.gamma_multiply(0.28)
+            } else {
+                Color32::from_rgb(50, 55, 64)
+            },
+        );
+        painter.circle_stroke(
+            center,
+            radius,
+            Stroke::new(self.stroke(1.5), base.gamma_multiply(0.85)),
+        );
+        painter.text(center, Align2::CENTER_CENTER, "M", self.font(11.0), base);
+
+        // The mark points at the angle the shaft reached.
+        let angle = motor.angle_deg().to_radians() - std::f32::consts::FRAC_PI_2;
+        let tip = Pos2::new(
+            center.x + angle.cos() * radius * 0.82,
+            center.y + angle.sin() * radius * 0.82,
+        );
+        painter.line_segment(
+            [center, tip],
+            Stroke::new(self.stroke(2.0), Color32::from_rgb(226, 232, 240)),
+        );
+
+        painter.text(
+            Pos2::new(rect.center().x, rect.bottom() - 5.0 * self.zoom),
+            Align2::CENTER_BOTTOM,
+            format!("{:+.0} rpm · {:.1} 圈", motor.rpm(), motor.turns()),
+            self.font(9.0),
+            if spinning { COLOR_TEXT } else { COLOR_DIM },
         );
     }
 

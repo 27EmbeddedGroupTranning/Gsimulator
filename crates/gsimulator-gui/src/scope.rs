@@ -276,10 +276,8 @@ impl ScopeWindow {
     /// One cell per bit under the trace, on the same time axis, so a bit can be
     /// matched with the waveform above it. Hovering a cell names the bit.
     fn bit_ruler(&self, ui: &mut egui::Ui, first: u64, span: u64, frames: &[&TraceFrame]) {
-        let (response, painter) = ui.allocate_painter(
-            Vec2::new(ui.available_width(), 46.0),
-            egui::Sense::hover(),
-        );
+        let (response, painter) =
+            ui.allocate_painter(Vec2::new(ui.available_width(), 46.0), egui::Sense::hover());
         let rect = response.rect;
         painter.rect_filled(rect, 3.0, Color32::from_rgb(14, 20, 24));
         let cells = Rect::from_min_max(
@@ -304,7 +302,9 @@ impl ScopeWindow {
         for frame in frames {
             for (index, bit) in frame.bits.iter().enumerate() {
                 let x0 = x_of(bit.time_ns).max(cells.left());
-                let x1 = x_of(cell_end(frame, index)).min(cells.right()).max(x0 + 0.5);
+                let x1 = x_of(cell_end(frame, index))
+                    .min(cells.right())
+                    .max(x0 + 0.5);
                 if x0 >= cells.right() || x1 <= cells.left() {
                     continue;
                 }
@@ -401,7 +401,11 @@ impl ScopeWindow {
             if !trace.acknowledged {
                 ui.colored_label(Color32::from_rgb(230, 170, 80), "无应答");
             }
-            ui.label(RichText::new(frame_summary(trace)).small().color(Color32::GRAY));
+            ui.label(
+                RichText::new(frame_summary(trace))
+                    .small()
+                    .color(Color32::GRAY),
+            );
         });
 
         egui::ScrollArea::vertical()
@@ -435,9 +439,7 @@ fn field_color(field: BitField) -> Color32 {
         BitField::DataLength => Color32::from_rgb(230, 180, 90),
         BitField::Data => Color32::from_rgb(120, 210, 160),
         BitField::Crc => Color32::from_rgb(200, 140, 220),
-        BitField::CrcDelimiter | BitField::AcknowledgeDelimiter => {
-            Color32::from_rgb(150, 150, 160)
-        }
+        BitField::CrcDelimiter | BitField::AcknowledgeDelimiter => Color32::from_rgb(150, 150, 160),
         BitField::Acknowledge => Color32::from_rgb(240, 200, 110),
         BitField::EndOfFrame => Color32::from_rgb(150, 160, 180),
         BitField::Intermission => Color32::from_rgb(110, 120, 135),
@@ -463,7 +465,11 @@ fn bit_tooltip(ui: &mut egui::Ui, index: usize, frame: &TraceFrame, bit: TraceBi
         ui.label(
             RichText::new(format!(
                 "{} ID={}",
-                if decoded.extended { "扩展帧" } else { "标准帧" },
+                if decoded.extended {
+                    "扩展帧"
+                } else {
+                    "标准帧"
+                },
                 decoded.id_label()
             ))
             .small()
@@ -480,7 +486,11 @@ fn frame_summary(trace: &TraceFrame) -> String {
             parts.push(format!(
                 "{}{}",
                 if frame.extended { "扩展" } else { "标准" },
-                if frame.remote { "远程帧" } else { "数据帧" }
+                if frame.remote {
+                    "远程帧"
+                } else {
+                    "数据帧"
+                }
             ));
             parts.push(format!("ID={}", frame.id_label()));
             parts.push(format!("DLC={}", frame.dlc));

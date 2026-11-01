@@ -12,7 +12,9 @@ use crate::board::{
 use crate::bridge;
 use crate::canbus::{CanAction, CanBusWindow};
 use crate::canvas::Schematic;
+use crate::debugger::DebugWindow;
 use crate::library::DeviceLibrary;
+use crate::motor_doc::{MotorLive, MotorProtocolWindow};
 use crate::peripherals::PeripheralBrowser;
 use crate::project;
 use crate::scope::{ScopeAction, ScopeWindow};
@@ -54,8 +56,14 @@ pub struct App {
     stimulus: StimulusWindow,
     /// Window listing every part that can be placed on the canvas.
     library: DeviceLibrary,
+    /// On/off switch and port of the built-in virtual ST-Link.
+    debug: DebugWindow,
+    /// Wire format document of the CAN motor it was opened from.
+    motor_doc: MotorProtocolWindow,
     /// Text typed into each UART terminal, keyed by device id.
     uart_input: std::collections::BTreeMap<u32, String>,
+    /// Speed typed for each CAN motor, keyed by device id.
+    motor_rpm: std::collections::BTreeMap<u32, f32>,
 }
 
 impl App {
@@ -105,7 +113,10 @@ impl App {
             scope: ScopeWindow::default(),
             stimulus,
             library: DeviceLibrary::new(),
+            debug: DebugWindow::new(),
+            motor_doc: MotorProtocolWindow::default(),
             uart_input: std::collections::BTreeMap::new(),
+            motor_rpm: std::collections::BTreeMap::new(),
         }
     }
 
@@ -298,6 +309,20 @@ impl App {
                 .clicked()
             {
                 self.can_bus.toggle();
+            }
+            let debug_label = if self.debug.is_listening() {
+                "🐞 调试服务 ●"
+            } else {
+                "🐞 调试服务"
+            };
+            if ui
+                .selectable_label(self.debug.open, debug_label)
+                .on_hover_text(
+                    "在指定端口上开启虚拟 ST-Link，让 GDB / VS Code 调试这份正在运行的仿真",
+                )
+                .clicked()
+            {
+                self.debug.toggle();
             }
             ui.separator();
             ui.spacing_mut().slider_width = 90.0;
@@ -578,11 +603,11 @@ impl App {
             ui.horizontal(|ui| {
                 match kind {
                     DeviceKind::Led => {
-                        let lit = self.board_state.led_lit(id);
-                        let (text, color) = if lit {
-                            ("点亮", accent)
-                        } else {
-                            ("熄灭", Color32::from_rgb(110, 118, 130))
+                        let brightness = self.board_state.led_brightness(id);
+                        let (text, color) = match (brightness * 100.0).round() as u32 {
+                            0 => ("熄灭".to_string(), Color32::from_rgb(110, 118, 130)),
+                            100 => ("点亮".to_string(), accent),
+                            percent => (format!("调光 {percent}%"), accent),
                         };
                         ui.label(RichText::new(format!("● {name}")).color(color));
                         ui.label(RichText::new(text).color(Color32::GRAY));
@@ -655,15 +680,65 @@ impl App {
                         };
                         ui.label(RichText::new(text).color(Color32::GRAY));
                     }
-                    DeviceKind::Resistor | DeviceKind::Scope => {
+                    DeviceKind::Resistor => {
                         ui.label(RichText::new(format!("● {name}")).color(accent));
-                        ui.label(
-                            RichText::new(if kind == DeviceKind::Resistor {
-                                "无源"
-                            } else {
-                                "仪器"
+                        let ohms = device
+                            .hardware
+                            .resistor()
+                            .map(|resistor| resistor.ohms())
+                            .unwrap_or_default();
+                        let network = self.board.can_network();
+                        let text = if network.terminator_ids.contains(&id) {
+                            format!(
+                                "{} · 终端 · 并联 {}",
+                                gsim_devices::format_ohms(ohms),
+                                crate::board::termination_label(network.termination_ohm)
+                            )
+                        } else {
+                            format!("{} · 未跨接 CANH/CANL", gsim_devices::format_ohms(ohms))
+                        };
+                        ui.label(RichText::new(text).color(Color32::GRAY));
+                    }
+                    DeviceKind::Scope => {
+                        ui.label(RichText::new(format!("● {name}")).color(accent));
+                        let (samples, window) = device
+                            .hardware
+                            .scope()
+                            .map(|scope| {
+                                let scope = scope.borrow();
+                                (scope.samples().len(), scope.window_ns())
                             })
-                            .color(Color32::GRAY),
+                            .unwrap_or((0, 0));
+                        ui.label(
+                            RichText::new(format!("{samples} 点 · {:.2} ms", window as f64 / 1e6))
+                                .color(Color32::GRAY),
+                        );
+                    }
+                    DeviceKind::Motor => {
+                        ui.label(RichText::new(format!("● {name}")).color(accent));
+                        let (spin, rpm, target, commands) = device
+                            .hardware
+                            .motor()
+                            .map(|motor| {
+                                let motor = motor.borrow();
+                                (
+                                    motor.spin().label(),
+                                    motor.rpm(),
+                                    motor.target_rpm(),
+                                    motor.commands(),
+                                )
+                            })
+                            .unwrap_or(("停转", 0.0, 0.0, 0));
+                        let color = if spin == "停转" {
+                            Color32::from_rgb(140, 148, 160)
+                        } else {
+                            accent
+                        };
+                        ui.label(
+                            RichText::new(format!(
+                                "{spin} · {rpm:+.0} rpm（目标 {target:+.0}）· 指令 {commands}"
+                            ))
+                            .color(color),
                         );
                     }
                     DeviceKind::Junction => {
@@ -714,13 +789,14 @@ impl App {
             match kind {
                 DeviceKind::Uart => self.uart_controls(ui, id),
                 DeviceKind::Encoder => self.encoder_controls(ui, id),
+                DeviceKind::Resistor => self.resistor_controls(ui, id),
+                DeviceKind::Scope => self.scope_controls(ui, id),
+                DeviceKind::Motor => self.motor_controls(ui, id),
                 DeviceKind::Led
                 | DeviceKind::Vcc
                 | DeviceKind::Gnd
                 | DeviceKind::Can
                 | DeviceKind::Matrix
-                | DeviceKind::Resistor
-                | DeviceKind::Scope
                 | DeviceKind::HseCrystal
                 | DeviceKind::LseCrystal
                 | DeviceKind::Junction => {}
@@ -841,6 +917,246 @@ impl App {
                     .color(Color32::from_rgb(240, 190, 90)),
             );
         }
+    }
+
+    /// Resistance of one resistor, and what it does to the CAN pair.
+    fn resistor_controls(&mut self, ui: &mut egui::Ui, id: u32) {
+        let Some(ohms) = self
+            .board
+            .device(id)
+            .and_then(|device| device.hardware.resistor())
+            .map(|resistor| resistor.ohms())
+        else {
+            return;
+        };
+        let network = self.board.can_network();
+        let on_pair = network.terminator_ids.contains(&id);
+
+        let mut value = ohms;
+        let mut changed = false;
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("阻值").small().color(Color32::GRAY));
+            for preset in gsim_devices::Resistor::PRESETS {
+                let label = gsim_devices::format_ohms(preset);
+                if ui
+                    .selectable_label((ohms - preset).abs() < 0.5, label)
+                    .clicked()
+                {
+                    value = preset;
+                    changed = true;
+                }
+            }
+            if ui
+                .add(
+                    egui::DragValue::new(&mut value)
+                        .speed(1.0)
+                        .range(0.1..=1_000_000.0)
+                        .suffix(" Ω"),
+                )
+                .changed()
+            {
+                changed = true;
+            }
+        });
+        if changed {
+            self.set_resistor_value(id, value);
+        }
+
+        let (text, color) = if !on_pair {
+            (
+                "1、2 两端没有跨接在 CANH 与 CANL 之间：它只是普通电阻，不影响总线".to_string(),
+                Color32::from_rgb(150, 158, 170),
+            )
+        } else {
+            let quality = network.quality();
+            let text = format!(
+                "并联终端 {} → 总线质量 {:.0}% · 位错误率 {:.3}%/位{}",
+                crate::board::termination_label(network.termination_ohm),
+                quality * 100.0,
+                gsim_devices::bit_error_rate(quality) * 100.0,
+                if quality > 0.99 {
+                    "（教科书接法）"
+                } else if quality > 0.5 {
+                    "（能用，但偶发振铃丢帧）"
+                } else {
+                    "（严重失配，帧会被判错）"
+                }
+            );
+            let color = if quality > 0.9 {
+                Color32::from_rgb(120, 200, 130)
+            } else if quality > 0.4 {
+                Color32::from_rgb(240, 190, 90)
+            } else {
+                Color32::from_rgb(240, 120, 110)
+            };
+            (text, color)
+        };
+        ui.label(RichText::new(text).small().color(color));
+    }
+
+    /// Sets the resistance of one resistor and refreshes the snapshot.
+    fn set_resistor_value(&mut self, id: u32, ohms: f64) {
+        let Some(resistor) = self
+            .board
+            .device_mut(id)
+            .and_then(|device| device.hardware.resistor_mut())
+        else {
+            return;
+        };
+        resistor.set_ohms(ohms);
+        self.refresh_snapshot();
+    }
+
+    /// Shortcut from a probe row to its window.
+    fn scope_controls(&mut self, ui: &mut egui::Ui, id: u32) {
+        let Some(scope) = self
+            .board
+            .device(id)
+            .and_then(|device| device.hardware.scope())
+            .cloned()
+        else {
+            return;
+        };
+        ui.horizontal(|ui| {
+            if ui
+                .button("打开示波器")
+                .on_hover_text("查看这个探头抓到的 CANH/CANL 波形")
+                .clicked()
+            {
+                self.scope.open = true;
+            }
+            let mut frozen = scope.borrow().frozen();
+            if ui.checkbox(&mut frozen, "冻结").changed() {
+                scope.borrow_mut().set_frozen(frozen);
+            }
+            if ui.small_button("清空").clicked() {
+                scope.borrow_mut().clear();
+            }
+        });
+    }
+
+    /// Command identifier plus a shortcut that puts a real command frame on
+    /// the bus, so the motor is driven the same way the firmware drives it.
+    fn motor_controls(&mut self, ui: &mut egui::Ui, id: u32) {
+        let Some(motor) = self
+            .board
+            .device(id)
+            .and_then(|device| device.hardware.motor())
+            .cloned()
+        else {
+            return;
+        };
+        let command_id = motor.borrow().command_id();
+        let on_pair = self
+            .board
+            .can_network()
+            .motors
+            .iter()
+            .any(|(motor_id, _)| *motor_id == id);
+        let mut rpm = self.motor_rpm.get(&id).copied().unwrap_or(1200.0);
+
+        let mut command = command_id;
+        let mut send = None;
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("指令 ID").small().color(Color32::GRAY));
+            if ui
+                .add(
+                    egui::DragValue::new(&mut command)
+                        .range(0..=0x7FF)
+                        .speed(1.0)
+                        .custom_formatter(|value, _| format!("0x{:03X}", value as u32)),
+                )
+                .changed()
+            {
+                motor.borrow_mut().set_command_id(command);
+            }
+            ui.separator();
+            ui.label(RichText::new("转速").small().color(Color32::GRAY));
+            ui.add(
+                egui::DragValue::new(&mut rpm)
+                    .speed(20.0)
+                    .range(-gsim_devices::motor::MAX_RPM..=gsim_devices::motor::MAX_RPM)
+                    .suffix(" rpm"),
+            );
+            if ui.small_button("正转 ▶").clicked() {
+                send = Some(rpm.abs());
+            }
+            if ui.small_button("◀ 反转").clicked() {
+                send = Some(-rpm.abs());
+            }
+            if ui.small_button("停止").clicked() {
+                send = Some(0.0);
+            }
+        });
+        self.motor_rpm.insert(id, rpm);
+        if let Some(speed) = send {
+            self.send_motor_command(id, speed);
+        }
+        let (text, color) = if on_pair {
+            (
+                format!(
+                    "正在听 0x{command_id:03X}：data[0..2] 是大端有符号转速；上面的按钮让外部节点真的发一帧"
+                ),
+                Color32::from_rgb(120, 200, 130),
+            )
+        } else {
+            (
+                "CANH/CANL 没有和收发器接在同一对线上：收不到任何指令".to_string(),
+                Color32::from_rgb(240, 190, 90),
+            )
+        };
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .small_button("📖 通讯协议")
+                .on_hover_text("在应用内查看这台电机收发的 CAN 报文格式")
+                .clicked()
+            {
+                self.motor_doc.open_for(id);
+            }
+            ui.label(RichText::new(text).small().color(color));
+        });
+    }
+
+    /// State the protocol document shows for the part it was opened from.
+    fn motor_live(&self) -> Option<MotorLive> {
+        let id = self.motor_doc.device()?;
+        let device = self.board.device(id)?;
+        let motor = device.hardware.motor()?.clone();
+        let motor = motor.borrow();
+        Some(MotorLive {
+            name: device.name.clone(),
+            command_id: motor.command_id(),
+            target_rpm: motor.target_rpm(),
+            rpm: motor.rpm(),
+            frames: motor.frames(),
+            commands: motor.commands(),
+            enabled: motor.enabled(),
+        })
+    }
+
+    /// Puts a speed command on the wire as the external node.
+    fn send_motor_command(&mut self, id: u32, rpm: f32) {
+        let Some(motor) = self
+            .board
+            .device(id)
+            .and_then(|device| device.hardware.motor())
+            .cloned()
+        else {
+            return;
+        };
+        let command_id = motor.borrow().command_id();
+        let speed = rpm.round().clamp(-32767.0, 32767.0) as i16;
+        let [high, low] = speed.to_be_bytes();
+        let frame = gsim_core::CanFrame::standard(command_id, &[high, low]);
+        let now = self.sim.now_ns();
+        self.board
+            .can_bus()
+            .borrow_mut()
+            .inject_bit_frame(frame, now);
+        self.schematic.say(
+            format!("外部节点发送电机指令 0x{command_id:03X}：{speed} rpm"),
+            false,
+        );
     }
 
     /// Manual control of one rotary encoder.
@@ -1034,9 +1350,24 @@ impl App {
         &self.board
     }
 
+    /// Mutable access to the circuit, so tests can place and tweak parts.
+    pub fn board_mut(&mut self) -> &mut Board {
+        &mut self.board
+    }
+
+    /// Refreshes the frame snapshot from the simulation and the drawing.
+    pub fn refresh(&mut self) {
+        self.refresh_snapshot();
+    }
+
     /// Device library window, exposed for the headless UI test.
     pub fn library_mut(&mut self) -> &mut DeviceLibrary {
         &mut self.library
+    }
+
+    /// Protocol document of the CAN motor, exposed for the headless UI test.
+    pub fn motor_protocol_mut(&mut self) -> &mut MotorProtocolWindow {
+        &mut self.motor_doc
     }
 
     fn update_speed(&mut self, now: std::time::Instant, before_ns: u64) {
@@ -1070,6 +1401,8 @@ impl App {
         // Soldering or removing a crystal takes effect immediately; the RCC
         // decides what to do with it, not the front end.
         self.sim.set_crystals(self.board.crystals());
+        // Serve the debugger first: a halt takes effect before this frame runs.
+        self.debug.poll(&mut self.sim);
         if self.snapshot.running {
             // Service the parts first, then let the core run a millisecond at a
             // time, so encoder edges and terminal bytes land between
@@ -1149,6 +1482,9 @@ impl App {
         if let Some(action) = self.stimulus.show(ctx, &self.snapshot) {
             self.apply_stimulus_action(action);
         }
+        self.debug.show(ctx, &mut self.sim);
+        let motor_live = self.motor_live();
+        self.motor_doc.show(ctx, motor_live.as_ref());
         // Picking a part in the library arms the canvas: the next click on the
         // drawing drops it (dragging the card there works too).
         if let Some(kind) = self.library.show(ctx, &self.board) {

@@ -19,6 +19,8 @@
 //!   network on the canvas; the board rules read its value.
 //! * [`oscilloscope`] – a two channel probe that records the wire levels so the
 //!   scope window can draw what the bus actually carried.
+//! * [`motor`] – a gear motor with a CAN driver: it follows the speed command
+//!   it hears on the bus and turns its shaft over the simulated time.
 //!
 //! They are ordinary state machines: feed them the [`gsim_core::Event`]s the
 //! SoC produced since the last step, then read their state for the UI or for
@@ -28,6 +30,7 @@ pub mod can_bus;
 pub mod crystal;
 pub mod encoder;
 pub mod max7219;
+pub mod motor;
 pub mod oscilloscope;
 pub mod resistor;
 pub mod uart;
@@ -39,6 +42,7 @@ pub use can_bus::{
 pub use crystal::{Crystal, CrystalKind};
 pub use encoder::{Direction, Encoder, Phase as EncoderPhase, EDGES_PER_DETENT};
 pub use max7219::{ChipState, Max7219, MATRIX_SIZE};
+pub use motor::{Motor, Spin};
 pub use oscilloscope::{Oscilloscope, ScopeSample};
 pub use resistor::{format_ohms, Resistor, CAN_TERMINATION_OHM};
 pub use uart::Uart;

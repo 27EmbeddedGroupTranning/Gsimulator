@@ -22,7 +22,7 @@ use crate::board::{
 };
 use crate::sim::Simulation;
 use gsim_core::can::DOMINANT;
-use gsim_devices::{ScopeSample, WireLevels};
+use gsim_devices::ScopeSample;
 
 /// `TX` pin of USART1/2/3 on the F103 (default mapping, no remap).
 pub const USART_TX_PINS: [(u8, u8); 3] = [(0, 9), (0, 2), (1, 10)];
@@ -59,6 +59,8 @@ pub struct ServiceReport {
     pub termination_ohm: Option<f64>,
     /// Electrical quality of the pair.
     pub quality: f64,
+    /// Motors wired to the pair, so they turn and acknowledge frames.
+    pub motors_wired: usize,
     /// Events handed to a device.
     pub events_delivered: usize,
 }
@@ -215,6 +217,22 @@ pub fn service(board: &mut Board, sim: &mut Simulation) -> ServiceReport {
     report.termination_ohm = network.termination_ohm;
     report.quality = network.quality();
 
+    // A motor only hears the wire - and only acknowledges and turns - while its
+    // two contacts sit on the pair and it has power. Every other motor is taken
+    // off the bus and coasts to a stop.
+    let mut motors_wired = 0;
+    for device in board.devices_mut() {
+        let Hardware::Motor(motor) = &device.hardware else {
+            continue;
+        };
+        let mut motor = motor.borrow_mut();
+        let on_pair = network.motors.iter().any(|(id, _)| *id == device.id);
+        motor.set_enabled(on_pair);
+        motor.service(now_ns);
+        motors_wired += usize::from(on_pair);
+    }
+    report.motors_wired = motors_wired;
+
     for entry in &wiring {
         let Some(device) = board
             .devices_mut()
@@ -337,6 +355,7 @@ pub fn run_frame(
         report.can_bits += advance_slice(board, sim, per_slice);
         report.termination_ohm = partial.termination_ohm;
         report.quality = partial.quality;
+        report.motors_wired = partial.motors_wired;
         report.events_delivered += partial.events_delivered;
     }
     report
@@ -349,7 +368,9 @@ fn advance_slice(board: &mut Board, sim: &mut Simulation, instructions: u32) -> 
     let supplies = board.supplies(&sim.pin_levels());
     let network = board
         .can_network_with(|id| !matches!(supplies.get(&id), Some(Supply::Unwired | Supply::Fault)));
-    let wired = network.nodes > 0;
+    // The wire is clocked as soon as a transceiver or a motor sits on it: a
+    // motor alone still has to hear the frames the panel injects.
+    let wired = network.nodes > 0 || !network.motors.is_empty();
     if !wired {
         sim.advance_frame(instructions);
         return 0;
@@ -360,7 +381,6 @@ fn advance_slice(board: &mut Board, sim: &mut Simulation, instructions: u32) -> 
     // self test), so it is sampled again for every bit: feeding the wire to a
     // self clocked controller would corrupt its frame.
     let bus = board.can_bus();
-    let quality = network.quality();
     let scopes = network.scopes.clone();
     let target_ns = sim.now_ns().saturating_add(sim.ns_for(instructions));
     let mut bits = 0;
@@ -381,15 +401,14 @@ fn advance_slice(board: &mut Board, sim: &mut Simulation, instructions: u32) -> 
             bus.step(driven, now_ns)
         };
         let glitch = bus.borrow().last_glitch();
+        let levels = bus.borrow().voltages(level);
         if on_wire {
             sim.can_sample_bit(0, level);
         }
-        let levels = WireLevels::of(level);
-        let ringing = ((1.0 - quality) * 0.9) as f32;
         let sample = ScopeSample {
             time_ns: now_ns,
-            can_h: levels.can_h + ringing,
-            can_l: levels.can_l - ringing,
+            can_h: levels.can_h,
+            can_l: levels.can_l,
             dominant: level == DOMINANT,
             glitch,
         };

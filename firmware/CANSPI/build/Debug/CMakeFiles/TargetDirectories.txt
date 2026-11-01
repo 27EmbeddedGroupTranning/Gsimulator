@@ -1,0 +1,6 @@
+C:/Users/27354/Desktop/Gsimulater/firmware/CANSPI/build/Debug/CMakeFiles/CANSPI.dir
+C:/Users/27354/Desktop/Gsimulater/firmware/CANSPI/build/Debug/CMakeFiles/edit_cache.dir
+C:/Users/27354/Desktop/Gsimulater/firmware/CANSPI/build/Debug/CMakeFiles/rebuild_cache.dir
+C:/Users/27354/Desktop/Gsimulater/firmware/CANSPI/build/Debug/cmake/stm32cubemx/CMakeFiles/STM32_Drivers.dir
+C:/Users/27354/Desktop/Gsimulater/firmware/CANSPI/build/Debug/cmake/stm32cubemx/CMakeFiles/edit_cache.dir
+C:/Users/27354/Desktop/Gsimulater/firmware/CANSPI/build/Debug/cmake/stm32cubemx/CMakeFiles/rebuild_cache.dir

@@ -1,0 +1,44 @@
+{
+    // 调试 Cortex-Debug 配置（launch.json）之前，由 preLaunchTask 拉起这个后台任务：
+    // 它启动 Gsimulator 的「虚拟 ST-Link」（GDB 远程协议服务器），监听 127.0.0.1:3333。
+    // 调试结束（或按 Shift+F5）时 VS Code 会自动结束后台任务，端口随之释放。
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "gsim: 启动虚拟 ST-Link",
+            "type": "shell",
+            "command": "cargo",
+            "args": [
+                "run",
+                "-p",
+                "gsimulator-cli",
+                "--",
+                "gdb",
+                "--elf",
+                "${workspaceFolder}/firmware/CANSPI/build/Debug/CANSPI.elf",
+                "--bind",
+                "127.0.0.1:3333"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "isBackground": true,
+            "problemMatcher": {
+                "owner": "gsim",
+                "pattern": {
+                    "regexp": "^(?:error|warning)\\s+GSIM-(?<code>\\d+):\\s+(?<message>.*)$"
+                },
+                "background": {
+                    "activeOnStart": true,
+                    "beginsPattern": "(Compiling|Finished|Running|Building)",
+                    "endsPattern": "virtual ST-Link listening on"
+                }
+            },
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated",
+                "clear": true
+            }
+        }
+    ]
+}

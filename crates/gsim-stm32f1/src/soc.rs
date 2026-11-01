@@ -33,6 +33,42 @@ pub const DEFAULT_STEP_NS: u64 = 1_000;
 /// Maximum number of DMA transfers serviced in one simulation step.
 const MAX_DMA_TRANSFERS_PER_STEP: usize = 1024;
 
+/// Alternate-function pins of the timer compare outputs, indexed
+/// `[timer][AFIO remap setting][channel]`.
+///
+/// Undefined remap settings fall back to the default mapping, which is what the
+/// reference manual documents for the unused codes.
+const TIM_CHANNEL_PINS: [[[(u8, u8); 4]; 4]; 4] = [
+    // TIM1: full remap moves the channels to port E.
+    [
+        [(0, 8), (0, 9), (0, 10), (0, 11)],
+        [(0, 8), (0, 9), (0, 10), (0, 11)],
+        [(0, 8), (0, 9), (0, 10), (0, 11)],
+        [(4, 9), (4, 11), (4, 13), (4, 14)],
+    ],
+    // TIM2: partial remaps move CH1/CH2 or CH3/CH4, the full remap both.
+    [
+        [(0, 0), (0, 1), (0, 2), (0, 3)],
+        [(0, 15), (1, 3), (0, 2), (0, 3)],
+        [(0, 0), (0, 1), (1, 10), (1, 11)],
+        [(0, 15), (1, 3), (1, 10), (1, 11)],
+    ],
+    // TIM3: partial remap moves CH1/CH2, the full remap everything to port C.
+    [
+        [(0, 6), (0, 7), (1, 0), (1, 1)],
+        [(0, 6), (0, 7), (1, 0), (1, 1)],
+        [(1, 4), (1, 5), (1, 0), (1, 1)],
+        [(2, 6), (2, 7), (2, 8), (2, 9)],
+    ],
+    // TIM4: a single remap bit moves the channels to port D.
+    [
+        [(1, 6), (1, 7), (1, 8), (1, 9)],
+        [(3, 12), (3, 13), (3, 14), (3, 15)],
+        [(1, 6), (1, 7), (1, 8), (1, 9)],
+        [(1, 6), (1, 7), (1, 8), (1, 9)],
+    ],
+];
+
 /// Square-wave phase an oscillator shows on its pins at `now_ns`.
 fn oscillator_level(now_ns: u64, hz: u32) -> bool {
     let half_period = (1_000_000_000 / (u64::from(hz.max(1)) * 2)).max(1);
@@ -329,6 +365,69 @@ impl Soc {
         }
     }
 
+    /// GPIO pin a timer compare output reaches, honouring the `AFIO` remap.
+    pub fn tim_channel_pin(&self, unit: usize, channel: usize) -> Option<(u8, u8)> {
+        let remap = match unit {
+            0 => self.afio.tim1_remap(),
+            1 => self.afio.tim2_remap(),
+            2 => self.afio.tim3_remap(),
+            3 => u32::from(self.afio.tim4_remapped()),
+            _ => return None,
+        };
+        TIM_CHANNEL_PINS
+            .get(unit)?
+            .get(remap as usize)?
+            .get(channel)
+            .copied()
+    }
+
+    /// Fraction of the last PWM window a pin was driven high, `None` when the
+    /// pin is not an enabled timer output.
+    ///
+    /// The front end samples this once per frame, so it never aliases with the
+    /// PWM frequency the way a single pin read would.
+    pub fn pin_duty(&self, port: usize, pin: u8) -> Option<f32> {
+        if !self.gpio.get(port)?.is_alternate_output(pin) {
+            return None;
+        }
+        for unit in 0..self.tim.len() {
+            for channel in 0..4 {
+                if self.tim_channel_pin(unit, channel) == Some((port as u8, pin)) {
+                    if let Some(duty) = self.tim[unit].channel_duty(channel) {
+                        return Some(duty);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Puts every enabled compare output on the alternate-function pin it is
+    /// mapped to, so a PWM channel shows up on the schematic.
+    fn refresh_timer_outputs(&mut self, cx: &Ctx) {
+        for unit in 0..self.tim.len() {
+            for channel in 0..4 {
+                let Some((port, pin)) = self.tim_channel_pin(unit, channel) else {
+                    continue;
+                };
+                let level = if self.tim[unit].output_enabled(channel) {
+                    self.tim[unit].output_level(channel)
+                } else {
+                    None
+                };
+                let Some(gpio) = self.gpio.get_mut(usize::from(port)) else {
+                    continue;
+                };
+                match level {
+                    Some(high) if gpio.is_alternate_output(pin) => {
+                        gpio.set_alternate_output(pin, high, cx)
+                    }
+                    _ => gpio.clear_alternate_output(pin),
+                }
+            }
+        }
+    }
+
     /// Hands one frame from the external bus to the CAN controller, which runs
     /// it through its acceptance filters. Returns `true` when a filter accepted
     /// it and it was queued in a receive FIFO.
@@ -514,6 +613,10 @@ impl Soc {
         self.rtc.advance(&cx, dt);
         self.iwdg.advance(&cx, dt);
         self.wwdg.advance(&cx, dt);
+
+        // A compare output reaches its pin as soon as the timer moved, which is
+        // what turns a PWM channel into a level the board can see.
+        self.refresh_timer_outputs(&cx);
 
         self.service_dma(&cx);
         self.drain_events(&cx);

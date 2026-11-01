@@ -6,7 +6,7 @@ use eframe::egui;
 use gsimulator_gui::app::App;
 use gsimulator_gui::board::{Board, DeviceKind, PinLevels, PinRef, POWER_PIN};
 use gsimulator_gui::canvas::Schematic;
-use gsimulator_gui::sim::{Simulation, Source};
+use gsimulator_gui::sim::{Simulation, Source, StimulusConfig, StimulusWaveform};
 
 fn raw_input() -> egui::RawInput {
     egui::RawInput {
@@ -19,7 +19,7 @@ fn raw_input() -> egui::RawInput {
 }
 
 #[test]
-fn stimulus_toggles_pa5_and_lights_the_demo_led() {
+fn the_stimulus_dims_the_demo_led_by_its_duty_cycle() {
     let mut sim = Simulation::new();
     sim.start_stimulus();
     let board = Board::demo();
@@ -27,26 +27,41 @@ fn stimulus_toggles_pa5_and_lights_the_demo_led() {
 
     let mut saw_high = false;
     let mut saw_low = false;
-    let mut saw_lit = false;
-    let mut saw_dark = false;
-
     for _ in 0..40 {
         sim.advance_frame(400_000);
-        let levels = sim.pin_levels();
-        let state = board.evaluate(&levels);
-        if levels.level_of(0, 5) {
+        if sim.pin_levels().level_of(0, 5) {
             saw_high = true;
-            saw_lit |= state.led_lit(led);
         } else {
             saw_low = true;
-            saw_dark |= !state.led_lit(led);
         }
     }
-
     assert!(saw_high, "the stimulus never drove PA5 high");
     assert!(saw_low, "the stimulus never drove PA5 low");
-    assert!(saw_lit, "the LED never lit up");
-    assert!(saw_dark, "the LED never went dark again");
+
+    // The default stimulus is a 50 % square wave, so the LED sits at half
+    // brightness instead of flickering with the sampled instant.
+    let brightness = board.evaluate(&sim.pin_levels()).led_brightness(led);
+    assert!((brightness - 0.5).abs() < 1e-6, "brightness {brightness}");
+
+    // A constant level is a 0 %/100 % duty: fully dark, fully on.
+    for (waveform, expected) in [
+        (StimulusWaveform::Level(false), 0.0),
+        (StimulusWaveform::Level(true), 1.0),
+    ] {
+        sim.set_stimulus_config(StimulusConfig {
+            port: 0,
+            pin: 5,
+            waveform,
+        })
+        .expect("config must be valid");
+        sim.start_stimulus();
+        sim.advance_frame(400_000);
+        let brightness = board.evaluate(&sim.pin_levels()).led_brightness(led);
+        assert!(
+            (brightness - expected).abs() < 1e-6,
+            "expected {expected}, got {brightness}"
+        );
+    }
 }
 
 #[test]
@@ -187,6 +202,130 @@ fn schematic_renders_every_element_without_a_display() {
         });
     });
     assert!(!output.shapes.is_empty(), "nothing was painted");
+}
+
+#[test]
+fn the_device_panel_shows_the_resistor_value_and_its_effect() {
+    use gsimulator_gui::board::{
+        CAN_CANH, CAN_CANL, RESISTOR_A, RESISTOR_B, SCOPE_CANH, SCOPE_CANL,
+    };
+
+    let ctx = egui::Context::default();
+    let mut app = App::with_context(&ctx, None);
+    let (resistor, transceiver, scope) = {
+        let board = app.board_mut();
+        let transceiver = board.add_can(egui::Pos2::new(480.0, 200.0));
+        let resistor = board.add_resistor(egui::Pos2::new(300.0, 320.0));
+        let scope = board.add_scope(egui::Pos2::new(700.0, 320.0));
+        let pin = |device: u32, pin: u8| PinRef::Device { device, pin };
+        // The resistor bridges CANH and CANL, the probe taps the same pair.
+        board.connect(pin(transceiver, CAN_CANH), pin(resistor, RESISTOR_A));
+        board.connect(pin(resistor, RESISTOR_B), pin(transceiver, CAN_CANL));
+        board.connect(pin(transceiver, CAN_CANH), pin(scope, SCOPE_CANH));
+        board.connect(pin(transceiver, CAN_CANL), pin(scope, SCOPE_CANL));
+        (resistor, transceiver, scope)
+    };
+    let _ = (transceiver, scope);
+    app.refresh();
+
+    // One 120 Ω part across the pair: the panel reports the load it creates.
+    let network = app.board().can_network();
+    assert_eq!(network.terminator_ids, vec![resistor]);
+    assert!(network.quality() > 0.4 && network.quality() < 1.0);
+
+    // The whole window renders with the resistor row and its value controls.
+    let output = ctx.run(raw_input(), |ctx| app.draw(ctx));
+    assert!(!output.shapes.is_empty(), "the app painted nothing");
+}
+
+#[test]
+fn the_device_panel_turns_the_can_motor_from_a_frame_on_the_bus() {
+    use gsimulator_gui::board::{
+        CAN_CANH, CAN_CANL, MOTOR_CANH, MOTOR_CANL, MOTOR_GND, MOTOR_VCC, POWER_PIN,
+    };
+
+    let ctx = egui::Context::default();
+    let mut app = App::with_context(&ctx, None);
+    let motor = {
+        let board = app.board_mut();
+        let transceiver = board.add_can(egui::Pos2::new(480.0, 200.0));
+        let motor = board.add_motor(egui::Pos2::new(760.0, 200.0));
+        let vcc = board.add_vcc(egui::Pos2::new(60.0, 700.0));
+        let gnd = board.add_gnd(egui::Pos2::new(200.0, 700.0));
+        let pin = |device: u32, pin: u8| PinRef::Device { device, pin };
+        board.connect(pin(transceiver, CAN_CANH), pin(motor, MOTOR_CANH));
+        board.connect(pin(transceiver, CAN_CANL), pin(motor, MOTOR_CANL));
+        board.connect(pin(vcc, POWER_PIN), pin(motor, MOTOR_VCC));
+        board.connect(pin(gnd, POWER_PIN), pin(motor, MOTOR_GND));
+        motor
+    };
+    app.refresh();
+    assert_eq!(
+        app.board().can_network().motors.len(),
+        1,
+        "the motor sits on the pair"
+    );
+
+    // The panel is drawn with the motor row, and a command put on the wire by
+    // the external node reaches the part while the app runs its frames.
+    let command = gsim_core::CanFrame::standard(0x200, &1200i16.to_be_bytes());
+    app.board_mut()
+        .can_bus()
+        .borrow_mut()
+        .inject_bit_frame(command, app.sim_time_ns());
+    for _ in 0..8 {
+        let output = ctx.run(raw_input(), |ctx| app.draw(ctx));
+        assert!(!output.shapes.is_empty(), "the app painted nothing");
+    }
+
+    let handle = app
+        .board()
+        .device(motor)
+        .and_then(|device| device.hardware.motor().cloned())
+        .expect("motor model");
+    let handle = handle.borrow();
+    assert_eq!(handle.commands(), 1, "the panel's frame reached the motor");
+    assert!(handle.rpm() > 0.0, "the shaft turns: {} rpm", handle.rpm());
+}
+
+#[test]
+fn the_motor_panel_opens_the_protocol_document() {
+    use gsimulator_gui::board::{
+        CAN_CANH, CAN_CANL, MOTOR_CANH, MOTOR_CANL, MOTOR_GND, MOTOR_VCC, POWER_PIN,
+    };
+
+    let ctx = egui::Context::default();
+    let mut app = App::with_context(&ctx, None);
+    let motor = {
+        let board = app.board_mut();
+        let transceiver = board.add_can(egui::Pos2::new(480.0, 200.0));
+        let motor = board.add_motor(egui::Pos2::new(760.0, 200.0));
+        let vcc = board.add_vcc(egui::Pos2::new(60.0, 700.0));
+        let gnd = board.add_gnd(egui::Pos2::new(200.0, 700.0));
+        let pin = |device: u32, pin: u8| PinRef::Device { device, pin };
+        board.connect(pin(transceiver, CAN_CANH), pin(motor, MOTOR_CANH));
+        board.connect(pin(transceiver, CAN_CANL), pin(motor, MOTOR_CANL));
+        board.connect(pin(vcc, POWER_PIN), pin(motor, MOTOR_VCC));
+        board.connect(pin(gnd, POWER_PIN), pin(motor, MOTOR_GND));
+        motor
+    };
+    app.refresh();
+
+    // What the panel's "通讯协议" button does: attach the document to this part.
+    app.motor_protocol_mut().open_for(motor);
+    assert!(app.motor_protocol_mut().is_open());
+    assert_eq!(app.motor_protocol_mut().device(), Some(motor));
+
+    // The window is drawn together with the rest of the app, live state and all.
+    for _ in 0..3 {
+        let output = ctx.run(raw_input(), |ctx| app.draw(ctx));
+        assert!(!output.shapes.is_empty(), "the app painted nothing");
+    }
+
+    // Deleting the part must not take the window (or the frame) down.
+    app.board_mut().remove_device(motor);
+    let output = ctx.run(raw_input(), |ctx| app.draw(ctx));
+    assert!(!output.shapes.is_empty(), "the app painted nothing");
 }
 
 #[test]

@@ -208,6 +208,7 @@ impl CanBusWindow {
                         "位错误率",
                         format!("{:.3} %/位", bus_error_rate(can.quality) * 100.0),
                     ),
+                    ("差分幅度", format!("{:.0} mV", can.amplitude_mv)),
                     ("位传输", format!("{}", can.bus.bits)),
                     ("尖峰（线路振铃）", format!("{}", can.bus.glitches)),
                     ("仲裁失败", format!("{}", can.bus.arbitration_lost)),

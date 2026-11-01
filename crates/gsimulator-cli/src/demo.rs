@@ -651,8 +651,9 @@ fn can_wire_physics(soc: &Rc<RefCell<Soc>>, can: u32) {
     );
 
     for (label, ohms) in [
-        ("两个 120 Ω（并联 60 Ω）", Some(60.0)),
+        ("两个 120 Ω（并联 60 Ω，教科书接法）", Some(60.0)),
         ("只留一个 120 Ω", Some(120.0)),
+        ("两只都改成 30 Ω（并联 15 Ω，负载过重）", Some(15.0)),
         ("完全没有终端电阻", None),
     ] {
         wire.borrow_mut().set_termination(ohms);

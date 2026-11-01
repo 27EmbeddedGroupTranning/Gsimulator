@@ -151,6 +151,8 @@ pub enum DeviceKind {
     Resistor,
     /// Oscilloscope probe on the two wires of the CAN pair.
     Scope,
+    /// Gear motor with a CAN driver: it follows the speed command frame.
+    Motor,
     /// Tap point on a wire (also usable as a free standing terminal).
     ///
     /// Double clicking a wire splices one in: the wire is split into two halves
@@ -199,6 +201,14 @@ pub const RESISTOR_B: u8 = 1;
 pub const SCOPE_CANH: u8 = 0;
 /// Pin index of the probe on `CANL`.
 pub const SCOPE_CANL: u8 = 1;
+/// Pin index of the motor's `CANH` contact.
+pub const MOTOR_CANH: u8 = 0;
+/// Pin index of the motor's `CANL` contact.
+pub const MOTOR_CANL: u8 = 1;
+/// Pin index of the motor's `VCC` contact.
+pub const MOTOR_VCC: u8 = 2;
+/// Pin index of the motor's `GND` contact.
+pub const MOTOR_GND: u8 = 3;
 /// Pin index of the matrix data input (`MOSI`).
 pub const MATRIX_DIN: u8 = 0;
 /// Pin index of the matrix shift clock (`SCK`).
@@ -359,6 +369,29 @@ pub const SCOPE_PINS: [PinDef; 2] = [
     },
 ];
 
+pub const MOTOR_PINS: [PinDef; 4] = [
+    PinDef {
+        name: "CANH",
+        role: PinRole::Bus,
+        side: Side::Left,
+    },
+    PinDef {
+        name: "CANL",
+        role: PinRole::Bus,
+        side: Side::Left,
+    },
+    PinDef {
+        name: "VCC",
+        role: PinRole::Vcc,
+        side: Side::Top,
+    },
+    PinDef {
+        name: "GND",
+        role: PinRole::Ground,
+        side: Side::Top,
+    },
+];
+
 /// The junction has a single contact, the tap point itself; it is drawn at the
 /// centre of the symbol rather than on a stub.
 pub const JUNCTION_PINS: [PinDef; 1] = [PinDef {
@@ -414,7 +447,7 @@ pub const MATRIX_PINS: [PinDef; 6] = [
 ];
 
 impl DeviceKind {
-    pub const ALL: [DeviceKind; 12] = [
+    pub const ALL: [DeviceKind; 13] = [
         DeviceKind::Led,
         DeviceKind::Uart,
         DeviceKind::Encoder,
@@ -426,6 +459,7 @@ impl DeviceKind {
         DeviceKind::LseCrystal,
         DeviceKind::Resistor,
         DeviceKind::Scope,
+        DeviceKind::Motor,
         DeviceKind::Junction,
     ];
 
@@ -441,6 +475,7 @@ impl DeviceKind {
             DeviceKind::HseCrystal | DeviceKind::LseCrystal => &CRYSTAL_PINS,
             DeviceKind::Resistor => &RESISTOR_PINS,
             DeviceKind::Scope => &SCOPE_PINS,
+            DeviceKind::Motor => &MOTOR_PINS,
             DeviceKind::Junction => &JUNCTION_PINS,
         }
     }
@@ -456,6 +491,7 @@ impl DeviceKind {
             DeviceKind::HseCrystal | DeviceKind::LseCrystal => Vec2::new(84.0, 56.0),
             DeviceKind::Resistor => Vec2::new(96.0, 44.0),
             DeviceKind::Scope => Vec2::new(132.0, 88.0),
+            DeviceKind::Motor => Vec2::new(140.0, 96.0),
             DeviceKind::Junction => Vec2::splat(16.0),
         }
     }
@@ -474,6 +510,7 @@ impl DeviceKind {
             DeviceKind::LseCrystal => "LSE",
             DeviceKind::Resistor => "R",
             DeviceKind::Scope => "OSC",
+            DeviceKind::Motor => "M",
             DeviceKind::Junction => "J",
         }
     }
@@ -492,6 +529,7 @@ impl DeviceKind {
             DeviceKind::LseCrystal => "LSE 晶振",
             DeviceKind::Resistor => "电阻",
             DeviceKind::Scope => "示波器",
+            DeviceKind::Motor => "CAN 电机",
             DeviceKind::Junction => "接线节点",
         }
     }
@@ -508,6 +546,7 @@ impl DeviceKind {
             DeviceKind::HseCrystal | DeviceKind::LseCrystal => "时钟",
             DeviceKind::Resistor => "无源",
             DeviceKind::Scope => "仪器",
+            DeviceKind::Motor => "执行",
             DeviceKind::Junction => "连接",
         }
     }
@@ -526,6 +565,7 @@ impl DeviceKind {
             DeviceKind::LseCrystal => "32.768 kHz 晶振，接到 PC14/PC15",
             DeviceKind::Resistor => "跨接 CANH/CANL 的终端电阻",
             DeviceKind::Scope => "抓取 CANH/CANL 波形的示波器",
+            DeviceKind::Motor => "听一条 CAN 指令转动的电机",
             DeviceKind::Junction => "双击导线插入的分支点，可当接线端子",
         }
     }
@@ -545,6 +585,7 @@ impl DeviceKind {
             DeviceKind::LseCrystal => "lse 晶振 crystal 32.768khz 32768 晶体 振荡器 rtc osc32",
             DeviceKind::Resistor => "resistor 电阻 终端电阻 120r 120欧 termination 无源",
             DeviceKind::Scope => "oscilloscope scope 示波器 波形 探头 抓波 仪器",
+            DeviceKind::Motor => "motor 电机 马达 驱动 转速 伺服 执行器 舵机 can",
             DeviceKind::Junction => "junction 节点 接线 端子 连接点 分支 tap 引出",
         }
     }
@@ -563,6 +604,7 @@ impl DeviceKind {
             DeviceKind::LseCrystal => "lse-crystal",
             DeviceKind::Resistor => "resistor",
             DeviceKind::Scope => "scope",
+            DeviceKind::Motor => "motor",
             DeviceKind::Junction => "junction",
         }
     }
@@ -678,6 +720,9 @@ pub enum Hardware {
     Resistor(gsim_devices::Resistor),
     /// Oscilloscope probe: the bridge pushes one sample per simulated bit.
     Scope(Rc<RefCell<gsim_devices::Oscilloscope>>),
+    /// CAN controlled motor: the bridge hands it the frames its bus node
+    /// decoded and the time to integrate its shaft over.
+    Motor(Rc<RefCell<gsim_devices::Motor>>),
 }
 
 impl Hardware {
@@ -747,6 +792,20 @@ impl Hardware {
     pub fn scope(&self) -> Option<&Rc<RefCell<gsim_devices::Oscilloscope>>> {
         match self {
             Hardware::Scope(scope) => Some(scope),
+            _ => None,
+        }
+    }
+
+    pub fn motor(&self) -> Option<&Rc<RefCell<gsim_devices::Motor>>> {
+        match self {
+            Hardware::Motor(motor) => Some(motor),
+            _ => None,
+        }
+    }
+
+    pub fn motor_mut(&mut self) -> Option<&mut Rc<RefCell<gsim_devices::Motor>>> {
+        match self {
+            Hardware::Motor(motor) => Some(motor),
             _ => None,
         }
     }
@@ -1028,6 +1087,11 @@ impl Board {
             DeviceKind::Scope => Hardware::Scope(Rc::new(RefCell::new(
                 gsim_devices::Oscilloscope::new(&format!("OSC{index}")),
             ))),
+            // The motor is a node of its own on the pair: it hears the frames
+            // bit by bit and acknowledges them like any other part.
+            DeviceKind::Motor => Hardware::Motor(Rc::new(RefCell::new(
+                gsim_devices::Motor::attach(Rc::clone(&self.can_bus), &format!("M{index}")),
+            ))),
         };
         self.devices.push(Device {
             id,
@@ -1101,6 +1165,11 @@ impl Board {
             .iter()
             .filter_map(|device| device.hardware.scope().cloned())
             .collect()
+    }
+
+    /// Places a CAN controlled motor and returns its id.
+    pub fn add_motor(&mut self, pos: Pos2) -> DeviceId {
+        self.add_device(DeviceKind::Motor, pos)
     }
 
     /// Crystals wired across the oscillator pins, whatever the firmware later
@@ -1380,13 +1449,19 @@ impl Board {
 
         let mut network = CanNetwork::default();
         for device in &self.devices {
-            if device.kind != DeviceKind::Can || !powered(device.id) {
+            if !powered(device.id) {
                 continue;
             }
-            let (Some(canh), Some(canl)) = (
-                net_of_pin(device.id, CAN_CANH),
-                net_of_pin(device.id, CAN_CANL),
-            ) else {
+            // A transceiver or a motor defines the pair; everything else on it
+            // (terminators, probes, more motors) is found from the topology.
+            let (high, low, controller) = match device.kind {
+                DeviceKind::Can => (CAN_CANH, CAN_CANL, true),
+                DeviceKind::Motor => (MOTOR_CANH, MOTOR_CANL, false),
+                _ => continue,
+            };
+            let (Some(canh), Some(canl)) =
+                (net_of_pin(device.id, high), net_of_pin(device.id, low))
+            else {
                 continue;
             };
             if canh == canl {
@@ -1397,7 +1472,7 @@ impl Board {
                 network.canh_net = Some(canh);
                 network.canl_net = Some(canl);
             }
-            if network.canh_net == Some(canh) && network.canl_net == Some(canl) {
+            if network.canh_net == Some(canh) && network.canl_net == Some(canl) && controller {
                 network.nodes += 1;
             }
         }
@@ -1416,6 +1491,7 @@ impl Board {
                         if (a == canh && b == canl) || (a == canl && b == canh));
                     if bridges && resistor.ohms() > 0.0 {
                         network.terminators.push(resistor.ohms());
+                        network.terminator_ids.push(device.id);
                     }
                 }
                 Hardware::Scope(scope) => {
@@ -1423,6 +1499,13 @@ impl Board {
                         && net_of_pin(device.id, SCOPE_CANL) == Some(canl)
                     {
                         network.scopes.push(Rc::clone(scope));
+                    }
+                }
+                Hardware::Motor(motor) => {
+                    if net_of_pin(device.id, MOTOR_CANH) == Some(canh)
+                        && net_of_pin(device.id, MOTOR_CANL) == Some(canl)
+                    {
+                        network.motors.push((device.id, Rc::clone(motor)));
                     }
                 }
                 _ => {}
@@ -1515,6 +1598,7 @@ impl Board {
         let (nets, net_of) = self.nets_and_index();
 
         let mut levels_of_nets = Vec::with_capacity(nets.len());
+        let mut high_of_nets = Vec::with_capacity(nets.len());
         let mut shorts = Vec::new();
         for net in &nets {
             let level = self.net_level(net, levels);
@@ -1522,6 +1606,7 @@ impl Board {
                 shorts.push(net.clone());
             }
             levels_of_nets.push(level);
+            high_of_nets.push(self.net_high_fraction(net, levels));
         }
 
         let mut leds = BTreeMap::new();
@@ -1535,15 +1620,22 @@ impl Board {
                     device: device.id,
                     pin: device.kind.pin_with_role(PinRole::Negative).unwrap_or(1),
                 });
-                let lit = match (positive, negative) {
-                    (Some(positive), Some(negative)) => {
-                        positive != negative
-                            && levels_of_nets[*positive] == NetLevel::High
-                            && levels_of_nets[*negative] == NetLevel::Low
+                // The LED conducts while its anode net sits above its cathode
+                // net, so the duty cycles of a PWM driven pair decide how
+                // bright it looks instead of a single sampled instant.
+                let brightness = match (positive, negative) {
+                    (Some(positive), Some(negative)) if positive != negative => {
+                        let (anode, cathode) =
+                            (levels_of_nets[*positive], levels_of_nets[*negative]);
+                        if Self::open(anode) || Self::open(cathode) {
+                            0.0
+                        } else {
+                            (high_of_nets[*positive] - high_of_nets[*negative]).clamp(0.0, 1.0)
+                        }
                     }
-                    _ => false,
+                    _ => 0.0,
                 };
-                leds.insert(device.id, lit);
+                leds.insert(device.id, brightness);
             }
         }
 
@@ -1586,6 +1678,32 @@ impl Board {
             (false, false) => NetLevel::Floating,
         }
     }
+
+    /// Fraction of the time a net is high, taken from its strongest driver.
+    ///
+    /// A pin carrying a PWM waveform contributes its measured duty, so a 25 %
+    /// channel reads `0.25` instead of a random sampled level, and a pin that
+    /// only listens to the net does not dilute it.
+    fn net_high_fraction(&self, net: &[PinRef], levels: &PinLevels) -> f32 {
+        let mut high: Option<f32> = None;
+        for node in net {
+            let duty = match node {
+                PinRef::Mcu { port, pin } => levels.duty_of(*port, *pin),
+                PinRef::Device { device, .. } => match self.device(*device).map(|d| d.kind) {
+                    Some(DeviceKind::Vcc) => 1.0,
+                    Some(DeviceKind::Gnd) => 0.0,
+                    _ => continue,
+                },
+            };
+            high = Some(high.map_or(duty, |current: f32| current.max(duty)));
+        }
+        high.unwrap_or(0.0)
+    }
+
+    /// A net that neither side drives carries no LED current.
+    fn open(level: NetLevel) -> bool {
+        matches!(level, NetLevel::Floating | NetLevel::Shorted)
+    }
 }
 
 /// How the CAN pair is wired on this drawing.
@@ -1604,8 +1722,12 @@ pub struct CanNetwork {
     pub termination_ohm: Option<f64>,
     /// Values of the resistors that terminate the pair.
     pub terminators: Vec<f64>,
+    /// Ids of those resistors, in the same order.
+    pub terminator_ids: Vec<DeviceId>,
     /// Oscilloscopes wired across the pair.
     pub scopes: Vec<Rc<RefCell<gsim_devices::Oscilloscope>>>,
+    /// Motors whose two wire contacts sit on the pair, with their device ids.
+    pub motors: Vec<(DeviceId, Rc<RefCell<gsim_devices::Motor>>)>,
     /// Parts whose wire contacts sit on the pair.
     pub nodes: usize,
 }
@@ -1632,6 +1754,9 @@ pub enum NetLevel {
 pub struct PinLevels {
     pub level: [[bool; 16]; 5],
     pub output: [[bool; 16]; 5],
+    /// Measured high-time fraction of pins driven by a timer compare output,
+    /// `None` for pins that do not modulate.
+    pub pwm: [[Option<f32>; 16]; 5],
 }
 
 impl PinLevels {
@@ -1650,6 +1775,18 @@ impl PinLevels {
             .copied()
             .unwrap_or(false)
     }
+
+    /// Fraction of the time the pin is high: the measured duty of a PWM output,
+    /// or `1.0`/`0.0` for a pin that holds one level.
+    pub fn duty_of(&self, port: u8, pin: u8) -> f32 {
+        self.pwm
+            .get(port as usize)
+            .and_then(|levels| levels.get(pin as usize))
+            .copied()
+            .flatten()
+            .unwrap_or(if self.level_of(port, pin) { 1.0 } else { 0.0 })
+            .clamp(0.0, 1.0)
+    }
 }
 
 /// Result of evaluating the board.
@@ -1658,14 +1795,22 @@ pub struct BoardState {
     pub nets: Vec<Vec<PinRef>>,
     pub levels_of_nets: Vec<NetLevel>,
     pub shorts: Vec<Vec<PinRef>>,
-    pub leds: BTreeMap<DeviceId, bool>,
+    /// LED brightness, `0.0` (dark) to `1.0` (full on). A PWM channel dims the
+    /// LED down to its duty cycle.
+    pub leds: BTreeMap<DeviceId, f32>,
     /// Supply state of every part whose symbol has `VCC`/`GND` contacts.
     pub supplies: BTreeMap<DeviceId, Supply>,
 }
 
 impl BoardState {
+    /// How bright an LED is, from dark to fully on.
+    pub fn led_brightness(&self, id: DeviceId) -> f32 {
+        self.leds.get(&id).copied().unwrap_or(0.0)
+    }
+
+    /// True while an LED emits any light at all.
     pub fn led_lit(&self, id: DeviceId) -> bool {
-        self.leds.get(&id).copied().unwrap_or(false)
+        self.led_brightness(id) > 0.0
     }
 
     /// How the supply of `id` is wired, `None` for parts without power pins.
@@ -1784,10 +1929,7 @@ impl Board {
                 }
                 Hardware::Resistor(resistor) => {
                     let network = &snapshot.can.network;
-                    let on_pair = network
-                        .terminators
-                        .iter()
-                        .any(|ohms| (*ohms - resistor.ohms()).abs() < f64::EPSILON);
+                    let on_pair = network.terminator_ids.contains(&device.id);
                     snapshot.peripherals.push(status(
                         &device.name,
                         "电阻（无源）",
@@ -1803,6 +1945,37 @@ impl Board {
                                 .to_string(),
                             ),
                             ("总线终端", termination_label(network.termination_ohm)),
+                        ],
+                    ));
+                }
+                Hardware::Motor(motor) => {
+                    let motor = motor.borrow();
+                    let on_pair = snapshot
+                        .can
+                        .network
+                        .motors
+                        .iter()
+                        .any(|(id, _)| *id == device.id);
+                    snapshot.peripherals.push(status(
+                        &device.name,
+                        "CAN 电机（外部）",
+                        vec![
+                            ("节点", motor.name().to_string()),
+                            ("接在总线上", if on_pair { "是" } else { "否" }.to_string()),
+                            (
+                                "指令帧",
+                                format!("0x{:03X} · data[0..2] = 目标转速", motor.command_id()),
+                            ),
+                            ("状态", motor.spin().label().to_string()),
+                            ("转速", format!("{:+.0} rpm", motor.rpm())),
+                            ("目标转速", format!("{:+.0} rpm", motor.target_rpm())),
+                            ("累计圈数", format!("{:+.2} 圈", motor.turns())),
+                            ("已收帧", format!("{}", motor.frames())),
+                            ("已收指令", format!("{}", motor.commands())),
+                            (
+                                "供电",
+                                if motor.enabled() { "正常" } else { "断开" }.to_string(),
+                            ),
                         ],
                     ));
                 }
@@ -1908,6 +2081,62 @@ mod tests {
 
         let state = board.evaluate(&levels(&[(0, 5)], &[]));
         assert!(!state.led_lit(led), "LED must go dark when PA5 is low");
+    }
+
+    /// Levels where `PA5` carries a measured PWM duty instead of one level.
+    fn pwm_levels(duty: f32) -> PinLevels {
+        let mut levels = levels(&[], &[]);
+        levels.output[0][5] = true;
+        levels.level[0][5] = duty > 0.5;
+        levels.pwm[0][5] = Some(duty);
+        levels
+    }
+
+    #[test]
+    fn a_pwm_duty_dims_the_led_instead_of_flickering() {
+        let board = Board::demo();
+        let led = board.first_of(DeviceKind::Led).expect("demo LED").id;
+
+        for (duty, expected) in [(0.0, 0.0), (0.25, 0.25), (0.75, 0.75), (1.0, 1.0)] {
+            let state = board.evaluate(&pwm_levels(duty));
+            let brightness = state.led_brightness(led);
+            assert!(
+                (brightness - expected).abs() < 1e-6,
+                "duty {duty} became brightness {brightness}"
+            );
+            assert_eq!(state.led_lit(led), duty > 0.0);
+        }
+    }
+
+    #[test]
+    fn a_dimming_channel_on_the_cathode_is_active_low() {
+        let mut board = Board::new();
+        let vcc = board.add_vcc(Pos2::new(10.0, 10.0));
+        let led = board.add_led(Pos2::new(100.0, 10.0));
+        board.connect(
+            PinRef::Device {
+                device: vcc,
+                pin: POWER_PIN,
+            },
+            PinRef::Device {
+                device: led,
+                pin: 0,
+            },
+        );
+        board.connect(
+            PinRef::Mcu { port: 0, pin: 5 },
+            PinRef::Device {
+                device: led,
+                pin: 1,
+            },
+        );
+
+        let state = board.evaluate(&pwm_levels(0.25));
+        let brightness = state.led_brightness(led);
+        assert!(
+            (brightness - 0.75).abs() < 1e-6,
+            "the LED conducts while the pin is low, got {brightness}"
+        );
     }
 
     #[test]

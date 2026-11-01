@@ -226,6 +226,8 @@ pub struct CanSnapshot {
     pub quality: f64,
     /// Duration of one bit on the wire.
     pub bit_ns: u64,
+    /// Differential amplitude a dominant bit still reaches, in millivolts.
+    pub amplitude_mv: f32,
     /// Bit level nodes attached to the wire, with their counters.
     pub peers: Vec<(String, PeerStats)>,
     /// Last error frame signalled on the wire, already formatted.
@@ -243,6 +245,7 @@ impl CanSnapshot {
         self.bus = bus.stats();
         self.quality = bus.quality();
         self.bit_ns = bus.bit_time();
+        self.amplitude_mv = bus.dominant_millivolts();
         self.peers = bus
             .peers()
             .iter()
@@ -287,6 +290,7 @@ impl Default for CanSnapshot {
             network: CanNetwork::default(),
             quality: 1.0,
             bit_ns: 0,
+            amplitude_mv: 2_000.0,
             peers: Vec::new(),
             last_error: None,
             last_arbitration: None,
@@ -341,10 +345,7 @@ impl ScopeView {
 
     /// Simulated time the stored trace covers, `None` when it is empty.
     pub fn span(&self) -> Option<(u64, u64)> {
-        Some((
-            self.samples.first()?.time_ns,
-            self.samples.last()?.time_ns,
-        ))
+        Some((self.samples.first()?.time_ns, self.samples.last()?.time_ns))
     }
 }
 
@@ -387,6 +388,11 @@ pub struct Simulation {
     source: Source,
     running: bool,
     halt: Option<String>,
+    /// Set while the debug service holds the core: nothing executes until GDB
+    /// resumes it, whatever the run/pause button says.
+    debug_hold: bool,
+    /// Why the firmware stopped last, for the debug service to report.
+    last_stop: Option<StopReason>,
     uart: Rc<RefCell<String>>,
     stimulus: StimulusConfig,
     /// Parsed `StimulusWaveform::Function` expression, if that mode is active.
@@ -441,6 +447,8 @@ impl Simulation {
             // the toolbar's 内置激励 switch (or a firmware ELF) adds a driver.
             running: true,
             halt: None,
+            debug_hold: false,
+            last_stop: None,
             uart,
             stimulus: StimulusConfig::default(),
             stimulus_expr: None,
@@ -602,6 +610,94 @@ impl Simulation {
         f(&mut self.soc.borrow_mut())
     }
 
+    // ------------------------------------------------------------ debug service
+
+    /// `true` while the debug service keeps the core from advancing.
+    pub fn debug_hold(&self) -> bool {
+        self.debug_hold
+    }
+
+    /// Freezes (or releases) the core for the debug service.
+    pub fn set_debug_hold(&mut self, hold: bool) {
+        self.debug_hold = hold;
+    }
+
+    /// Reason the firmware stopped last, taken once so it is reported once.
+    pub fn take_debug_stop(&mut self) -> Option<StopReason> {
+        self.last_stop.take()
+    }
+
+    /// Core of the loaded firmware, if any.
+    pub fn debug_cpu(&mut self) -> Option<&mut Cpu> {
+        self.cpu.as_mut()
+    }
+
+    /// Program counter of the loaded firmware.
+    pub fn debug_pc(&mut self) -> Option<u32> {
+        self.cpu.as_ref().map(Cpu::pc)
+    }
+
+    /// Stops the firmware where it is; the canvas freezes with it.
+    pub fn debug_halt(&mut self) {
+        if let Some(cpu) = self.cpu.as_mut() {
+            cpu.halt();
+        }
+        self.running = false;
+        self.debug_hold = true;
+        self.last_stop = None;
+        self.halt = Some("调试器已暂停".to_string());
+    }
+
+    /// Lets the firmware run on, as GDB's `continue` does.
+    pub fn debug_resume(&mut self) {
+        self.debug_hold = false;
+        self.last_stop = None;
+        self.halt = None;
+        if let Some(cpu) = self.cpu.as_mut() {
+            cpu.resume();
+        }
+        self.running = true;
+    }
+
+    /// Executes exactly one instruction and returns why it stopped, if it did.
+    ///
+    /// The hold is kept, so the core stays halted until the debugger asks for
+    /// more; a breakpoint that stopped the previous run is stepped over first,
+    /// exactly like GDB's `stepi`.
+    pub fn debug_step(&mut self) -> Option<StopReason> {
+        self.last_stop = None;
+        self.halt = None;
+        self.cpu.as_ref()?;
+        if let Some(cpu) = self.cpu.as_mut() {
+            cpu.resume();
+        }
+        self.run_firmware(1);
+        self.running = false;
+        self.last_stop.take()
+    }
+
+    /// Resets the chip the way pulling the reset pin does.
+    pub fn debug_reset(&mut self) -> Result<(), String> {
+        match self.source.clone() {
+            Source::Firmware(_) => {
+                let Some(cpu) = self.cpu.as_mut() else {
+                    return Err("没有加载固件".to_string());
+                };
+                cpu.soc().borrow_mut().system_reset(0);
+                cpu.reset().map_err(|error| error.to_string())?;
+                cpu.adopt_device_reset();
+                cpu.halt();
+                self.uart.borrow_mut().clear();
+                self.halt = None;
+                self.last_stop = None;
+                self.running = false;
+                self.debug_hold = true;
+                Ok(())
+            }
+            _ => Err("没有加载固件".to_string()),
+        }
+    }
+
     /// Starts the built-in stimulus with its current [`StimulusConfig`].
     ///
     /// The stimulus drives the real GPIO registers through the bus (`APB2ENR`
@@ -751,7 +847,7 @@ impl Simulation {
     /// Advances one frame: `budget` instructions, or the equivalent amount of
     /// simulated time at the current clock.
     pub fn advance_frame(&mut self, budget: u32) {
-        if !self.running || budget == 0 {
+        if !self.running || budget == 0 || self.debug_hold {
             return;
         }
         self.step_once(budget);
@@ -759,7 +855,7 @@ impl Simulation {
     /// Advances by `budget` instructions regardless of the run/pause state, as
     /// the single-step button does.
     pub fn step_once(&mut self, budget: u32) {
-        if budget == 0 {
+        if budget == 0 || self.debug_hold {
             return;
         }
         match self.source.clone() {
@@ -844,7 +940,7 @@ impl Simulation {
     pub fn run_until_ns(&mut self, target_ns: u64, chunk: u32) {
         let chunk = chunk.max(1);
         let mut guard = 0;
-        while self.running && self.now_ns() < target_ns && guard < 100_000 {
+        while self.running && !self.debug_hold && self.now_ns() < target_ns && guard < 100_000 {
             self.step_once(chunk);
             guard += 1;
         }
@@ -881,6 +977,7 @@ impl Simulation {
                 Ok(reason) => {
                     self.running = false;
                     self.halt = Some(format!("核心已停止：{reason:?}"));
+                    self.last_stop = Some(reason);
                     return;
                 }
                 Err(error) => {
@@ -954,6 +1051,10 @@ impl Simulation {
     }
 
     /// Current pin levels, read straight out of the GPIO models.
+    ///
+    /// A pin driven by a timer compare output also carries its measured duty,
+    /// so the board can dim an LED instead of seeing one sampled instant of the
+    /// PWM waveform.
     pub fn pin_levels(&self) -> PinLevels {
         let soc = self.soc.borrow();
         let mut levels = PinLevels::default();
@@ -961,7 +1062,19 @@ impl Simulation {
             for pin in 0..16u8 {
                 levels.level[port][pin as usize] = gpio.input_level(pin);
                 levels.output[port][pin as usize] = gpio.is_output(pin);
+                if gpio.is_alternate_output(pin) {
+                    levels.pwm[port][pin as usize] = soc.pin_duty(port, pin);
+                }
             }
+        }
+        drop(soc);
+        // The built-in stimulus is a front-end driver with no peripheral
+        // holding its waveform, so its configured duty is reported as is.
+        if let (Source::Stimulus, StimulusWaveform::Square { duty, .. }) =
+            (&self.source, &self.stimulus.waveform)
+        {
+            let port = usize::from(self.stimulus.port);
+            levels.pwm[port][usize::from(self.stimulus.pin)] = Some(duty.clamp(0.0, 1.0));
         }
         levels
     }

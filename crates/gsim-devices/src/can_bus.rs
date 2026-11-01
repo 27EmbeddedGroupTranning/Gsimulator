@@ -51,16 +51,19 @@ pub const CAN_L_RECESSIVE: f32 = 2.5;
 
 /// Electrical quality of the wire for a parallel termination of `ohms`.
 ///
-/// `60 Ω` (two `120 Ω` parts, one at each end) is the textbook load and scores
-/// `1.0`; an open pair scores next to nothing because the reflections swamp the
-/// differential signal. Values beyond the ideal by three times the ideal (or an
-/// open pair) fall to the floor.
+/// The wire wants `60 Ω` (two `120 Ω` parts, one at each end) and scores `1.0`
+/// there. Both directions are penalised on a log scale, because they are
+/// different faults: too high (or nothing at all) means the pair is not
+/// damped and rings, too low means the driver cannot hold the differential.
+/// An open pair scores next to nothing.
 pub fn quality_of(ohms: Option<f64>) -> f64 {
     let Some(ohms) = ohms.filter(|ohms| *ohms > 0.0 && ohms.is_finite()) else {
         return 0.03;
     };
-    let error = ((ohms - IDEAL_TERMINATION_OHM) / IDEAL_TERMINATION_OHM).abs();
-    (1.0 - error / 3.0).clamp(0.03, 1.0)
+    let ratio = (ohms / IDEAL_TERMINATION_OHM).max(1e-3);
+    // A factor of four either way is as bad as it gets.
+    let penalty = ratio.ln().abs() / 4.0_f64.ln();
+    (1.0 - penalty).clamp(0.03, 1.0)
 }
 
 /// Probability that a single bit reaches the receivers inverted.
@@ -69,7 +72,7 @@ pub fn quality_of(ohms: Option<f64>) -> f64 {
 /// what makes a marginal bus so annoying to debug.
 pub fn bit_error_rate(quality: f64) -> f64 {
     let shortfall = 1.0 - quality.clamp(0.0, 1.0);
-    shortfall * shortfall * shortfall * 0.03
+    shortfall * shortfall * shortfall * 0.02
 }
 
 /// Voltages of one sampled bit, as an oscilloscope sees them.
@@ -454,6 +457,38 @@ impl CanBus {
         self.last_glitch
     }
 
+    /// How much of the ideal differential the drivers can still hold, `0..=1`.
+    ///
+    /// Loading the pair harder than the textbook `60 Ω` costs amplitude; a
+    /// lighter load does not gain any, so the factor is capped at one.
+    fn load_factor(&self) -> f32 {
+        match self.termination {
+            Some(ohms) => (ohms / IDEAL_TERMINATION_OHM).clamp(0.2, 1.0) as f32,
+            None => 1.0,
+        }
+    }
+
+    /// Voltages the pair settles to for `level`, as a probe would see them.
+    ///
+    /// The termination network shows up twice: a pair that is loaded too hard
+    /// (a parallel resistance well under the ideal) cannot swing the full
+    /// differential, and a pair that is badly matched rings around the settled
+    /// level instead of staying flat.
+    pub fn voltages(&self, level: bool) -> WireLevels {
+        let ideal = WireLevels::of(level);
+        let load = self.load_factor();
+        let ringing = ((1.0 - self.quality) * 0.9) as f32 * 0.3;
+        WireLevels {
+            can_h: CAN_H_RECESSIVE + (ideal.can_h - CAN_H_RECESSIVE) * load + ringing,
+            can_l: CAN_L_RECESSIVE + (ideal.can_l - CAN_L_RECESSIVE) * load - ringing,
+        }
+    }
+
+    /// Differential amplitude a dominant bit still reaches, in volts.
+    pub fn dominant_millivolts(&self) -> f32 {
+        (CAN_H_DOMINANT - CAN_L_DOMINANT) * self.load_factor() * 1000.0
+    }
+
     /// `true` once the wire has been recessive for the intermission, which is
     /// when a node may start a frame.
     pub fn idle(&self) -> bool {
@@ -583,6 +618,23 @@ impl CanBus {
         &self.peers
     }
 
+    /// Switches a bit level node on or off the wire (a part that loses power
+    /// or is unplugged stops acknowledging and hearing frames).
+    pub fn set_peer_enabled(&mut self, node: NodeId, enabled: bool) {
+        if let Some(peer) = self.peers.iter_mut().find(|peer| peer.id() == node) {
+            peer.set_enabled(enabled);
+        }
+    }
+
+    /// Takes the frames a bit level node accepted since the last call.
+    pub fn take_received(&mut self, node: NodeId) -> Vec<CanFrame> {
+        self.peers
+            .iter_mut()
+            .find(|peer| peer.id() == node)
+            .map(Peer::take_received)
+            .unwrap_or_default()
+    }
+
     /// Queues a frame on a bit level node; it goes out bit by bit as soon as
     /// the wire is idle, exactly like a controller's mailbox.
     pub fn queue_frame(&mut self, node: NodeId, frame: CanFrame) -> bool {
@@ -632,6 +684,9 @@ impl CanBus {
 /// Name of the peer the inject panel talks through.
 pub const EXTERNAL_PEER: &str = "外部节点";
 
+/// Frames a bit level node keeps for the part it models.
+pub const PEER_RX_CAPACITY: usize = 16;
+
 /// Counters of one bit level node.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PeerStats {
@@ -671,12 +726,17 @@ pub struct Peer {
     id: NodeId,
     name: String,
     queue: VecDeque<CanFrame>,
+    /// Frames the node accepted from the wire, for the part it models.
+    rx: VecDeque<CanFrame>,
     active: Option<PeerTx>,
     decoder: FrameDecoder,
     ack_pending: bool,
     error_dominant: u8,
     error_recessive: u8,
     self_frame: Option<CanFrame>,
+    /// `false` for a part that is unpowered or not wired to the pair: it
+    /// neither acknowledges nor decodes anything.
+    enabled: bool,
     stats: PeerStats,
 }
 
@@ -686,12 +746,14 @@ impl Peer {
             id,
             name: name.to_string(),
             queue: VecDeque::new(),
+            rx: VecDeque::new(),
             active: None,
             decoder: FrameDecoder::new(),
             ack_pending: false,
             error_dominant: 0,
             error_recessive: 0,
             self_frame: None,
+            enabled: true,
             stats: PeerStats::default(),
         }
     }
@@ -708,6 +770,16 @@ impl Peer {
         self.stats
     }
 
+    /// `true` while the part takes part in the traffic on the wire.
+    pub fn enabled(&self) -> bool {
+        self.enabled
+    }
+
+    /// Frames the node accepted and nobody has collected yet.
+    pub fn received(&self) -> &VecDeque<CanFrame> {
+        &self.rx
+    }
+
     /// Frames waiting for the wire.
     pub fn queued(&self) -> usize {
         self.queue.len()
@@ -715,7 +787,8 @@ impl Peer {
 
     /// `true` while the node is using the wire or signalling an error.
     pub fn busy(&self) -> bool {
-        self.active.is_some() || self.error_dominant > 0 || self.error_recessive > 0
+        self.enabled
+            && (self.active.is_some() || self.error_dominant > 0 || self.error_recessive > 0)
     }
 
     fn drive(&mut self, frame: CanFrame) {
@@ -723,7 +796,7 @@ impl Peer {
     }
 
     fn start_if_idle(&mut self) {
-        if self.busy() {
+        if !self.enabled || self.busy() {
             return;
         }
         let Some(frame) = self.queue.pop_front() else {
@@ -738,6 +811,9 @@ impl Peer {
 
     /// Level the node drives on the pair during this bit.
     fn driven(&self) -> Option<bool> {
+        if !self.enabled {
+            return None;
+        }
         if self.error_dominant > 0 {
             return Some(DOMINANT);
         }
@@ -753,6 +829,9 @@ impl Peer {
     }
 
     fn sample(&mut self, level: bool, events: &mut Vec<PeerEvent>) {
+        if !self.enabled {
+            return;
+        }
         self.ack_pending = false;
         if self.error_dominant > 0 {
             self.error_dominant -= 1;
@@ -820,6 +899,10 @@ impl Peer {
             RxStep::Frame(frame) => {
                 if self.self_frame != Some(frame) {
                     self.stats.rx_frames += 1;
+                    if self.rx.len() >= PEER_RX_CAPACITY {
+                        self.rx.pop_front();
+                    }
+                    self.rx.push_back(frame);
                     events.push(PeerEvent::Received(self.id, frame));
                 }
             }
@@ -839,6 +922,28 @@ impl Peer {
         self.error_recessive = 8;
         self.ack_pending = false;
         self.decoder.reset();
+    }
+
+    /// Switches the part on or off the wire.
+    fn set_enabled(&mut self, enabled: bool) {
+        if self.enabled == enabled {
+            return;
+        }
+        self.enabled = enabled;
+        if !enabled {
+            // A part without power drops out of the frame it was receiving
+            // and stops acknowledging anything.
+            self.decoder.reset();
+            self.ack_pending = false;
+            self.error_dominant = 0;
+            self.error_recessive = 0;
+            self.self_frame = None;
+        }
+    }
+
+    /// Hands the decoded frames to whoever models the part.
+    fn take_received(&mut self) -> Vec<CanFrame> {
+        self.rx.drain(..).collect()
     }
 }
 
@@ -1210,6 +1315,61 @@ mod tests {
     }
 
     #[test]
+    fn a_listener_hands_the_frames_it_accepted_to_its_part() {
+        let mut bus = CanBus::new();
+        bus.set_termination(Some(60.0));
+        let sender = bus.add_peer("发送方");
+        let listener = bus.add_peer("电机");
+        bus.queue_frame(sender, CanFrame::standard(0x200, &[0x04, 0xB0]));
+        run(&mut bus, 400);
+
+        let frames = bus.take_received(listener);
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].id, 0x200);
+        assert_eq!(frames[0].bytes(), &[0x04, 0xB0]);
+        assert!(
+            bus.take_received(listener).is_empty(),
+            "the queue is drained"
+        );
+        assert!(
+            bus.take_received(sender).is_empty(),
+            "a node ignores itself"
+        );
+    }
+
+    #[test]
+    fn an_unpowered_node_leaves_the_wire_alone() {
+        let mut bus = CanBus::new();
+        bus.set_termination(Some(60.0));
+        let sender = bus.add_peer("发送方");
+        let motor = bus.add_peer("电机");
+        bus.set_peer_enabled(motor, false);
+        bus.queue_frame(sender, CanFrame::standard(0x200, &[1, 2]));
+        run(&mut bus, 400);
+
+        assert!(
+            bus.stats().error_frames >= 1,
+            "nobody acknowledged the frame"
+        );
+        assert!(
+            bus.take_received(motor).is_empty(),
+            "an off part hears nothing"
+        );
+
+        bus.set_peer_enabled(motor, true);
+        // The sender is still retrying the frame nobody acknowledged, so the
+        // part hears it as soon as it is powered again.
+        run(&mut bus, 800);
+        let frames = bus.take_received(motor);
+        assert!(
+            !frames.is_empty(),
+            "powered again, it decodes and acknowledges"
+        );
+        assert!(frames.iter().all(|frame| frame.id == 0x200));
+        assert_eq!(frames[0].bytes(), &[1, 2]);
+    }
+
+    #[test]
     fn an_open_pair_flips_bits_while_a_terminated_one_does_not() {
         let frame = CanFrame::standard(0x321, b"termination");
 
@@ -1235,6 +1395,49 @@ mod tests {
         assert!(open.glitches() > 0, "an unterminated pair must ring");
         assert!(open.quality() < 0.1);
         assert!(open.error_rate() > 0.0);
+    }
+
+    #[test]
+    fn the_voltages_follow_the_termination_value() {
+        let mut bus = CanBus::new();
+        bus.set_termination(Some(60.0));
+        let ideal = bus.voltages(DOMINANT);
+        assert!((ideal.can_h - 3.5).abs() < 0.01, "{ideal:?}");
+        assert!((ideal.can_l - 1.5).abs() < 0.01, "{ideal:?}");
+
+        // Loaded too hard: the same driver cannot swing the full differential.
+        bus.set_termination(Some(15.0));
+        let overloaded = bus.voltages(DOMINANT);
+        assert!(
+            overloaded.can_h - overloaded.can_l < ideal.can_h - ideal.can_l,
+            "a 15 Ω pair must swing less: {overloaded:?}"
+        );
+        assert!(bus.dominant_millivolts() < 1000.0);
+
+        // Badly matched: the pair swings fully but rings around the level.
+        bus.set_termination(None);
+        let open = bus.voltages(RECESSIVE);
+        assert!(open.can_h > CAN_H_RECESSIVE, "{open:?}");
+        assert!(open.can_l < CAN_L_RECESSIVE, "{open:?}");
+    }
+
+    #[test]
+    fn a_smaller_termination_degrades_the_bits() {
+        let frame = CanFrame::standard(0x123, b"termination");
+        let mut bus = CanBus::new();
+        // Two 30 Ω parts in parallel: 15 Ω, four times the load the pair wants.
+        bus.set_termination(Some(15.0));
+        assert!(bus.quality() < 0.3, "{}", bus.quality());
+        assert!(bus.error_rate() > 0.01, "{}", bus.error_rate());
+
+        let node = bus.add_peer("节点A");
+        bus.add_peer("节点B");
+        for _ in 0..6 {
+            bus.queue_frame(node, frame);
+        }
+        run(&mut bus, 2_400);
+        assert!(bus.glitches() > 0, "a 15 Ω pair must corrupt bits");
+        assert!(bus.stats().error_frames > 0, "{:?}", bus.stats());
     }
 
     #[test]

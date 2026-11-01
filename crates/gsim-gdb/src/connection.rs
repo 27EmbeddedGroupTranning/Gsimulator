@@ -38,6 +38,7 @@ pub struct Connection {
     buffer: Vec<u8>,
     queued: VecDeque<Vec<u8>>,
     acknowledge: bool,
+    non_blocking: bool,
 }
 
 impl Connection {
@@ -49,12 +50,23 @@ impl Connection {
             buffer: Vec::new(),
             queued: VecDeque::new(),
             acknowledge: true,
+            non_blocking: false,
         })
     }
 
     /// Turns acknowledgements off after `QStartNoAckMode`.
     pub fn set_acknowledge(&mut self, acknowledge: bool) {
         self.acknowledge = acknowledge;
+    }
+
+    /// Keeps the socket non-blocking for the lifetime of the connection.
+    ///
+    /// A front end that serves the protocol from its UI thread needs this: a
+    /// debugger that stops reading must fail the write instead of freezing the
+    /// window.
+    pub fn set_non_blocking(&mut self, non_blocking: bool) -> io::Result<()> {
+        self.non_blocking = non_blocking;
+        self.stream.set_nonblocking(non_blocking)
     }
 
     /// Sends one packet.
@@ -110,12 +122,12 @@ impl Connection {
                 Ok(read) => self.buffer.extend_from_slice(&chunk[..read]),
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
                 Err(error) => {
-                    self.stream.set_nonblocking(false)?;
+                    self.restore_blocking()?;
                     return Err(error);
                 }
             }
         }
-        self.stream.set_nonblocking(false)?;
+        self.restore_blocking()?;
         if closed {
             return Ok(Poll::Closed);
         }
@@ -130,9 +142,36 @@ impl Connection {
         Ok(Poll::Idle)
     }
 
+    /// Non-blocking [`Connection::wait`], for a front end that owns the device
+    /// on its own thread and only polls the socket once per frame.
+    ///
+    /// `None` means nothing arrived yet.
+    pub fn poll_wait(&mut self) -> io::Result<Option<Waiting>> {
+        match self.poll()? {
+            Poll::Interrupt => return Ok(Some(Waiting::Interrupt)),
+            Poll::Closed => return Ok(Some(Waiting::Closed)),
+            Poll::Idle => {}
+        }
+        match self.queued.pop_front() {
+            Some(packet) => {
+                self.acknowledge_arrival()?;
+                Ok(Some(Waiting::Packet(packet)))
+            }
+            None => Ok(None),
+        }
+    }
+
     /// Closes the socket; called when GDB detaches or kills the session.
     pub fn close(&mut self) {
         let _ = self.stream.shutdown(std::net::Shutdown::Both);
+    }
+
+    /// Leaves the socket non-blocking when the owner asked for that.
+    fn restore_blocking(&mut self) -> io::Result<()> {
+        if self.non_blocking {
+            return Ok(());
+        }
+        self.stream.set_nonblocking(false)
     }
 
     fn acknowledge_arrival(&mut self) -> io::Result<()> {

@@ -1,0 +1,48 @@
+{
+    // Pre-launch task of .vscode/launch.json: start the Gsimulator "virtual ST-Link"
+    // (a GDB remote protocol server) on 127.0.0.1:3333.
+    //
+    // The workspace folder is firmware/CANSPI, so cargo is pointed at the Cargo
+    // workspace two levels up with --manifest-path.
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "gsim: 启动虚拟 ST-Link",
+            "type": "shell",
+            "command": "cargo",
+            "args": [
+                "run",
+                "--manifest-path",
+                "${workspaceFolder}/../../Cargo.toml",
+                "-p",
+                "gsimulator-cli",
+                "--",
+                "gdb",
+                "--elf",
+                "${workspaceFolder}/build/Debug/CANSPI.elf",
+                "--bind",
+                "127.0.0.1:3333"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "isBackground": true,
+            "problemMatcher": {
+                "owner": "gsim",
+                "pattern": {
+                    "regexp": "^(?:error|warning)\\s+GSIM-(?<code>\\d+):\\s+(?<message>.*)$"
+                },
+                "background": {
+                    "activeOnStart": true,
+                    "beginsPattern": "(Compiling|Finished|Running|Building)",
+                    "endsPattern": "virtual ST-Link listening on"
+                }
+            },
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated",
+                "clear": true
+            }
+        }
+    ]
+}

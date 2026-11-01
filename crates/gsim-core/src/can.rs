@@ -1115,7 +1115,10 @@ impl TraceDecoder {
                 16 => (BitField::Acknowledge, 0),
                 17 => (BitField::AcknowledgeDelimiter, 0),
                 18..=24 => (BitField::EndOfFrame, (crc_start + 24 - index) as u8),
-                _ => (BitField::Intermission, (crc_start + 27).saturating_sub(index) as u8),
+                _ => (
+                    BitField::Intermission,
+                    (crc_start + 27).saturating_sub(index) as u8,
+                ),
             };
         }
         if index <= 11 {

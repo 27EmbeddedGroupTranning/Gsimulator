@@ -3,8 +3,10 @@
 //! The model reproduces the eight configurable pins per port, the atomic
 //! `BSRR`/`BRR` write registers and the configuration lock (`LCKR`). Reading
 //! `IDR` returns what a pin would actually sample: the output latch for pins
-//! configured as output, the pull resistor value for pull-up/pull-down inputs
-//! and the externally driven level for floating inputs.
+//! configured as output, the alternate-function level for pins a peripheral
+//! drives (a timer PWM channel), the pull resistor value for
+//! pull-up/pull-down inputs and the externally driven level for floating
+//! inputs.
 
 use super::map::gpio as reg;
 use gsim_core::bus::{extract, merge, AccessWidth, BusError};
@@ -29,6 +31,10 @@ pub struct GpioPort {
     lock_stage: u8,
     external: u16,
     driven: u16,
+    /// Pins whose level comes from an alternate function instead of `ODR`.
+    af_driven: u16,
+    /// Level an alternate function currently drives on those pins.
+    af_level: u16,
 }
 
 impl GpioPort {
@@ -43,6 +49,8 @@ impl GpioPort {
             lock_stage: 0,
             external: 0,
             driven: 0,
+            af_driven: 0,
+            af_level: 0,
         }
     }
 
@@ -81,11 +89,67 @@ impl GpioPort {
         self.odr & (1 << pin) != 0
     }
 
+    /// True when `pin` is configured as an alternate-function output, which is
+    /// how a timer compare output (PWM) reaches the outside world.
+    pub fn is_alternate_output(&self, pin: u8) -> bool {
+        let (cnf, mode) = self.config(pin);
+        mode != 0 && cnf & 0b10 != 0
+    }
+
+    /// Level an alternate function currently drives on `pin`, `None` while no
+    /// peripheral drives it.
+    pub fn alternate_level(&self, pin: u8) -> Option<bool> {
+        if pin > 15 {
+            return None;
+        }
+        let bit = 1u16 << pin;
+        (self.af_driven & bit != 0).then_some(self.af_level & bit != 0)
+    }
+
+    /// Drives a pin from an alternate function (a timer compare output).
+    ///
+    /// The level overrides the `ODR` latch for as long as the pin stays
+    /// configured as an alternate-function output, and every change is reported
+    /// like a normal output edge so devices and the trace see it.
+    pub fn set_alternate_output(&mut self, pin: u8, high: bool, cx: &Ctx) {
+        if pin > 15 {
+            return;
+        }
+        let bit = 1u16 << pin;
+        let was = self.af_driven & bit != 0;
+        let previous = self.af_level & bit != 0;
+        self.af_driven |= bit;
+        if high {
+            self.af_level |= bit;
+        } else {
+            self.af_level &= !bit;
+        }
+        if (!was || previous != high) && self.is_alternate_output(pin) {
+            cx.emit(Event::PinOutput {
+                port: self.index,
+                pin,
+                high,
+            });
+        }
+    }
+
+    /// Releases a pin driven by [`GpioPort::set_alternate_output`].
+    pub fn clear_alternate_output(&mut self, pin: u8) {
+        if pin <= 15 {
+            self.af_driven &= !(1u16 << pin);
+        }
+    }
+
     /// Level the input data register reports for `pin`.
     pub fn input_level(&self, pin: u8) -> bool {
         let (cnf, mode) = self.config(pin);
         if mode != 0 {
             // Output (push-pull, open-drain or alternate function).
+            if cnf & 0b10 != 0 {
+                if let Some(high) = self.alternate_level(pin) {
+                    return high;
+                }
+            }
             return self.output_level(pin);
         }
         if self.driven & (1 << pin) != 0 {
@@ -164,6 +228,11 @@ impl GpioPort {
             self.crl = updated;
         } else {
             self.crh = updated;
+        }
+        for pin in 0..8u8 {
+            if !self.is_alternate_output(first_pin + pin) {
+                self.clear_alternate_output(first_pin + pin);
+            }
         }
     }
 

@@ -529,13 +529,10 @@ impl Target {
     }
 
     fn refresh_watch_values(&mut self) {
-        self.watch_values = self
-            .watchpoints
+        let points = self.watchpoints.clone();
+        self.watch_values = points
             .iter()
-            .map(|point| {
-                self.read_memory(point.address, point.length)
-                    .unwrap_or_default()
-            })
+            .map(|point| Target::read_memory(self, point.address, point.length).unwrap_or_default())
             .collect();
     }
 
@@ -730,5 +727,129 @@ flash             flash geometry
             ),
             None => "no ELF loaded; use GDB `load` to program the simulated flash\n".to_string(),
         }
+    }
+}
+
+/// Everything the protocol layer asks of a debugged device.
+///
+/// [`Target`] implements it for the command line, which owns its own chip; the
+/// graphical front end implements it for the simulation it already runs, so
+/// both share one implementation of the remote protocol.
+pub trait DebugTarget {
+    /// Prepares the device for the first request of a session.
+    fn attach(&mut self);
+    /// Program counter without the Thumb bit.
+    fn pc(&mut self) -> u32;
+    /// Stops the core before its next instruction.
+    fn halt(&mut self);
+    /// Lets the core execute again.
+    fn resume(&mut self);
+    /// Executes a single instruction.
+    fn step(&mut self) -> Result<Option<Stop>, String>;
+    /// Resets the chip; the flash contents survive.
+    fn hard_reset(&mut self) -> Result<(), String>;
+    /// Whole register file in `g` packet order.
+    fn read_registers(&mut self) -> Vec<u32>;
+    /// One register of the `g`/`p` packet layout.
+    fn read_register(&mut self, index: usize) -> u32;
+    /// Writes the whole register file.
+    fn write_registers(&mut self, values: &[u32]);
+    /// Writes one register of the `G`/`P` packet layout.
+    fn write_register(&mut self, index: usize, value: u32);
+    /// Reads device memory, including flash and peripherals.
+    fn read_memory(&mut self, address: u32, length: u32) -> Result<Vec<u8>, String>;
+    /// Writes device memory.
+    fn write_memory(&mut self, address: u32, data: &[u8]) -> Result<(), String>;
+    /// Erases whole flash pages covering `length` bytes.
+    fn flash_erase(&mut self, address: u32, length: u32) -> Result<(), String>;
+    /// Programs already erased flash.
+    fn flash_write(&mut self, address: u32, data: &[u8]) -> Result<(), String>;
+    /// Arms a breakpoint; `false` means the device cannot take it.
+    fn insert_breakpoint(&mut self, kind: PointKind, address: u32, size: u32) -> bool;
+    /// Disarms a breakpoint again.
+    fn remove_breakpoint(&mut self, kind: PointKind, address: u32, size: u32) -> bool;
+    /// Arms a watchpoint; `false` means the device cannot take it.
+    fn insert_watchpoint(&mut self, kind: PointKind, address: u32, size: u32) -> bool;
+    /// Disarms a watchpoint again.
+    fn remove_watchpoint(&mut self, address: u32, size: u32) -> bool;
+    /// Handles a `monitor` command and returns its text.
+    fn monitor(&mut self, command: &str) -> String;
+}
+
+impl DebugTarget for Target {
+    fn attach(&mut self) {
+        Target::attach(self);
+    }
+
+    fn pc(&mut self) -> u32 {
+        Target::pc(self)
+    }
+
+    fn halt(&mut self) {
+        Target::halt(self);
+    }
+
+    fn resume(&mut self) {
+        Target::resume(self);
+    }
+
+    fn step(&mut self) -> Result<Option<Stop>, String> {
+        Target::step(self)
+    }
+
+    fn hard_reset(&mut self) -> Result<(), String> {
+        Target::hard_reset(self)
+    }
+
+    fn read_registers(&mut self) -> Vec<u32> {
+        Target::read_registers(self)
+    }
+
+    fn read_register(&mut self, index: usize) -> u32 {
+        Target::read_register(self, index)
+    }
+
+    fn write_registers(&mut self, values: &[u32]) {
+        Target::write_registers(self, values);
+    }
+
+    fn write_register(&mut self, index: usize, value: u32) {
+        let _ = Target::write_register(self, index, value);
+    }
+
+    fn read_memory(&mut self, address: u32, length: u32) -> Result<Vec<u8>, String> {
+        Target::read_memory(self, address, length)
+    }
+
+    fn write_memory(&mut self, address: u32, data: &[u8]) -> Result<(), String> {
+        Target::write_memory(self, address, data)
+    }
+
+    fn flash_erase(&mut self, address: u32, length: u32) -> Result<(), String> {
+        Target::flash_erase(self, address, length)
+    }
+
+    fn flash_write(&mut self, address: u32, data: &[u8]) -> Result<(), String> {
+        Target::flash_write(self, address, data)
+    }
+
+    fn insert_breakpoint(&mut self, kind: PointKind, address: u32, size: u32) -> bool {
+        Target::insert_breakpoint(self, kind, address, size)
+    }
+
+    fn remove_breakpoint(&mut self, kind: PointKind, address: u32, size: u32) -> bool {
+        Target::remove_breakpoint(self, kind, address, size)
+    }
+
+    fn insert_watchpoint(&mut self, kind: PointKind, address: u32, size: u32) -> bool {
+        Target::insert_watchpoint(self, kind, address, size)
+    }
+
+    fn remove_watchpoint(&mut self, address: u32, size: u32) -> bool {
+        Target::remove_watchpoint(self, address, size)
+    }
+
+    fn monitor(&mut self, command: &str) -> String {
+        Target::monitor(self, command)
     }
 }
