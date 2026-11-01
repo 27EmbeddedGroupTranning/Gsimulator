@@ -4,7 +4,7 @@ device 2 gnd 430.00 200.00
 device 3 led 600.00 120.00
 device 4 uart 600.00 300.00 unit=0
 device 5 encoder 600.00 480.00
-device 6 hse 300.00 470.00
+device 6 hse -64.00 148.00
 device 7 lse 300.00 570.00
 wire mcu:0:5 dev:3:0
 wire dev:2:0 dev:3:1

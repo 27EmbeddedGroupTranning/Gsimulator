@@ -355,10 +355,11 @@ fn advance_slice(board: &mut Board, sim: &mut Simulation, instructions: u32) -> 
         return 0;
     }
     // A controller in loopback (or silent) mode clocks itself: it is not on
-    // the wire, but the other nodes and the probes still are.
-    let on_wire = !sim.can_self_clocked(0);
+    // the wire, but the other nodes and the probes still are. The mode can
+    // change inside a slice (the firmware switches to loopback for its own
+    // self test), so it is sampled again for every bit: feeding the wire to a
+    // self clocked controller would corrupt its frame.
     let bus = board.can_bus();
-    let bit_ns = sim.can_bit_ns(0).max(1);
     let quality = network.quality();
     let scopes = network.scopes.clone();
     let target_ns = sim.now_ns().saturating_add(sim.ns_for(instructions));
@@ -366,8 +367,10 @@ fn advance_slice(board: &mut Board, sim: &mut Simulation, instructions: u32) -> 
     let mut guard = 0;
     while sim.is_running() && sim.now_ns() < target_ns && guard < 4096 {
         guard += 1;
+        let bit_ns = sim.can_bit_ns(0).max(1);
         sim.run_until_ns(sim.now_ns().saturating_add(bit_ns), CAN_INSTRUCTION_CHUNK);
         let now_ns = sim.now_ns();
+        let on_wire = !sim.can_self_clocked(0);
         let driven = if on_wire {
             sim.can_driven_level(0)
         } else {

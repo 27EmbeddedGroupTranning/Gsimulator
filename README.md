@@ -29,7 +29,7 @@ ELF 解析来自 [object](https://github.com/gimli-rs/object)。
 
 ![Gsimulator 图形前端](docs/gui.png)
 
-*（上图是放置好器件并连线后的样子；新建工程默认只有一颗已接好的 HSE 晶振。）*
+*（上图是打开 [`docs/example.gsim`](docs/example.gsim) 后的样子；新建工程默认只有一颗 HSE 晶振，摆在芯片左侧 PD0/PD1 旁并已接好线。）*
 
 ```powershell
 cargo run -p gsimulator-gui                     # 新工程：自动摆好 HSE 晶振，其余从器件库放置
@@ -69,9 +69,10 @@ CAN 收发器、SPI 灯阵（MAX7219 8×8）、HSE/LSE 晶振、接线节点。�
 * **工程文件（💾 保存工程… / 📂 打开工程…，`Ctrl+S` / `Ctrl+O`）**：把整张原理图
   （器件类型与位置、每根连线及其拐点、电阻阻值/终端串口号/CAN 模式/示波器时基等器件选项）
   存成可读的 `.gsim` 文本文件，下次打开即原样恢复；文件是逐行 UTF-8 文本，
-  可以直接看 diff、也能手改（格式见下）。仓库自带一份示例工程
-  [`docs/example.gsim`](docs/example.gsim)（VCC/GND、LED/PA5、UART1、编码器、HSE/LSE 晶振），
-  用「📂 打开工程…」选它就能得到文档里的演示接线。
+  可以直接看 diff、也能手改（格式见下）。仓库自带两份示例工程：
+  [`docs/example.gsim`](docs/example.gsim)（VCC/GND、LED/PA5、UART1、编码器、HSE/LSE 晶振）
+  和 [`docs/selftest.gsim`](docs/selftest.gsim)（`firmware/CAN` 的自检固件用的整套接线，
+  见第 1 节），用「📂 打开工程…」选它就能得到文档里的演示接线。
 
 驱动引脚的两个来源：
 
@@ -109,13 +110,13 @@ CAN 收发器、SPI 灯阵（MAX7219 8×8）、HSE/LSE 晶振、接线节点。�
 | **VCC / GND 电源** | `+` / `-` | 电源符号：接到的整个网络被拉成高电平 / 低电平（`VCC` 和 `GND` 接到同一网络即短路告警） | 可放多个，拖动、`Delete` 删除；状态面板的「电源」按钮从第一个符号起线 |
 | **CAN 收发器** | `TXD` `RXD` `CANH` `CANL` `VCC` `GND` | 物理层：`TXD` 的电平按位驱动总线对，`RXD` 回送总线（线与）采样到的电平；`CANH`/`CANL` 才是真正的两条线，要接到同一个网络的终端电阻与探头 | 画布显示模式与收发帧数；「CAN 总线」窗口可看帧、注入帧、切换模式、查看总线质量 |
 | **电阻** | `1` `2` | 无源器件，本身不驱动任何东西：跨接在 `CANH`/`CANL` 上就是**终端电阻**，并联值决定总线质量（默认 120 Ω，可在面板改值） | 面板里改阻值；拆掉/减少终端电阻，总线会开始丢帧 |
-| **示波器** | `H` `L` | 两通道探头，`H` 接 `CANH`、`L` 接 `CANL` 后每个仿真位采样一次，画出两条线的电压与差分；振铃导致的翻转会用红色竖线标出 | 「📈 示波器」窗口：时基、档位、差分视图、冻结/清空 |
+| **示波器** | `H` `L` | 两通道探头，`H` 接 `CANH`、`L` 接 `CANL` 后每个仿真位采样一次，画出两条线的电压与差分；振铃导致的翻转会用红色竖线标出，并在波形下方逐帧标出每一 bit 的字段定义 | 「📈 示波器」窗口：时基、档位、差分视图、冻结/清空、位标尺与逐位定义 |
 | **SPI 灯阵** | `DIN` `CLK` `CS` `DOUT` `VCC` `GND` | MAX7219 驱动的 8×8 点阵：按 SPI 时钟移位、`CS` 上升沿锁存一个 16 位字，`DOUT` 回送 16 位前的字节（供固件回读） | 画布上直接显示点阵画面；「外设浏览」里有寄存器细节与放大预览 |
-| **HSE 晶振** | `X1` `X2` | 8 MHz 高速晶体，接在 `OSC_IN`/`OSC_OUT`（PD0/PD1）。只有接好晶体、固件又置位 `HSEON`，`HSERDY` 才会在起振时间后置位；没接晶体时就像裸片一样永远等不到 ready | 放好后把 `X1`/`X2` 接到 PD0/PD1（无极性）。起振时 PD0/PD1 与连线按晶振频率真实翻转（采样到画布上就是闪烁），停止后自动释放 |
+| **HSE 晶振** | `X1` `X2` | 8 MHz 高速晶体，接在 `OSC_IN`/`OSC_OUT`（PD0/PD1）。只有接好晶体、固件又置位 `HSEON`，`HSERDY` 才会在起振时间后置位；没接晶体时就像裸片一样永远等不到 ready | **新建工程已经把它摆在芯片左侧、PD0/PD1 旁并接好线**（无极性）。起振时 PD0/PD1 与连线按晶振频率真实翻转（采样到画布上就是闪烁），停止后自动释放 |
 | **LSE 晶振** | `X1` `X2` | 32.768 kHz 手表晶振，接在 `OSC32_IN`/`OSC32_OUT`（PC14/PC15），给 RTC 当时钟源；同样只有固件置位 `LSEON` 才起振 | 接到 PC14/PC15（无极性）。起振时 PC14/PC15 与连线同样真实翻转 |
 | **接线节点** | `T` | 导线上的分支点：**双击一根连线**就在点击处插入一个节点，那根线从此分成两段（两段都接到节点的 `T` 上，网络不变），所以可以把它当**接线端子**再引线出去；也可以从器件库直接放一个独立节点当汇流点 | 点节点（或从它拖出）继续连线；双击节点删除并让两段线并回一根；`Delete` 删除选中的节点 |
 
-新建工程**默认只自动摆好 HSE 晶振**（已接到 PD0/PD1，MCU 起振就靠它），除此之外画布是空的、
+新建工程**默认只自动摆好 HSE 晶振**（放在芯片左侧 PD0/PD1 旁，已接好线，MCU 起振就靠它），除此之外画布是空的、
 也没有默认激励；其他器件都从「器件库」里放。接好线后用「💾 保存工程…」把整张图纸存成 `.gsim`，
 下次「📂 打开工程…」即可原样恢复；
 想直接看文档里的演示接线，就打开仓库自带的 [`docs/example.gsim`](docs/example.gsim)。
@@ -150,7 +151,7 @@ wire dev:3:0 dev:4:0 680.00,360.00 720.00,360.00
 接线规则（EDA 风格，模型在 `crates/gsim-devices/src/{uart,encoder,max7219,can_bus,crystal}.rs`）：
 
 * **供电（必须）**：UART 终端、旋转编码器、CAN 收发器、SPI 灯阵的符号上都有 `VCC` 与 `GND` 引脚（都在顶边），
-  用「器件库 → 电源」里的 `VCC`/`GND` 符号各接一根线（示例电路已经把终端与编码器接好）。
+  用「器件库 → 电源」里的 `VCC`/`GND` 符号各接一根线（仓库的 `docs/example.gsim` 已经把终端与编码器接好）。
   **没接电或接反的器件不工作**：终端不收也不发（输入的内容继续排队）、编码器不驱动任何引脚、
   收发器不上总线、灯阵不吃 SPI 帧。状态面板的器件行显示「VCC/GND 已接 / 未接（不工作）/ 接错（不工作）」。
   供电在每个仿真时间片重新判定（`bridge::service` 调用 `Board::supplies`），
@@ -253,19 +254,88 @@ OK
 `cargo test` 会自动用 `arm-none-eabi-gcc` 编译这个固件并逐字节断言上面的输出；
 如果机器上没有该交叉编译器，相关测试会跳过并给出提示。
 
-工作区里 `firmware/CAN` 的 CubeMX 工程（CAN 回环 + SPI1 + MAX7219）现在可以完整跑起来：
-`HAL_Init` → `SystemClock_Config`（HSE 8 MHz → PLL ×9 → 72 MHz，期间大量使用位带别名写 RCC）
-→ `HAL_CAN_Init`/滤波器/`HAL_CAN_Start` → SPI1 配置 MAX7219 → 主循环每 500 ms 在回环模式下
-发一帧 `"Hello"`（ID `0x123`），硬件回环命中滤波器后进入 FIFO0 并触发 CAN1_RX0 中断，
-回调里校验内容；每秒重画一次对号并做 DOUT 回读。
+工作区里 `firmware/CAN` 的 CubeMX 工程是一份**外设自检固件**：上电后不经过 HAL，
+直接用寄存器把模拟器建模过的每个外设跑一遍，并在 USART1（115200 8N1，PA9 = TX、PA10 = RX）
+上逐行打印结果：
 
-```powershell
-cargo run --release -- run firmware\CAN\build\Debug\CAN.elf -t 3000000 --trace
-# [trace] CanFrame { unit: 0, direction: Loopback, frame: CanFrame { id: 291, .. data: "Hello" } }
-# stopped: ... | 4 peripheral IRQs | ...
+```
+GSIM-SELFTEST 1
+CLK 72000000 HSE
+SYSTICK OK
+GPIO OK
+BITBAND OK
+EXTI OK
+USART1 OK
+USART2 OK
+USART3 OK
+SPI1 OK
+I2C1 OK
+TIM1 OK
+TIM2 OK
+TIM3 OK
+TIM4 OK
+ADC OK 2047
+DMA OK
+FLASH OK
+CRC OK 0xC704DD7B
+RTC OK
+PWR OK
+BKP OK
+CAN OK
+IWDG OK
+WWDG OK
+ENV HSE=READY LSE=WAIT RTC=LSI RESET=POR
+ONCHIP 23/23
+DEV MATRIX=NA ECHO=0x00000000
+LOOP
+EVT READY
 ```
 
+* `CLK`：HSE 8 MHz → PLL ×9 = 72 MHz。板上没接 HSE 晶振时自动退回 HSI 8 MHz
+  （`CLK 8000000 HSI`、`HSE=ABSENT`），不会卡在 `HSERDY` 上。
+* 每个 `OK` 都是一次真实的寄存器往返：GPIO 读 `IDR`/`LCKR`、位带别名改单个比特、EXTI 软件请求进中断、
+  USART2/3 发到 `TC`、SPI1 双字节收发、I2C1 在空总线上收到 NACK、TIM1/3 的比较标志、TIM2 双向计数、
+  TIM4 单脉冲、ADC1 单次转换、DMA1 存储器到存储器 + ADC 循环搬运、FLASH 末页擦除/编程/回读、
+  CRC 参考值、RTC 预分频与计数器、IWDG/WWDG 配置与计数、CAN1 内部回环收发。
+* `ENV` 给出板上的晶振、RTC 时钟源与复位原因；`ONCHIP n/m` 是成功的检查数。
+  示例里 `ADC OK 2047` 对应通道 1 上的 1650 mV（没有模拟输入时是 `ADC OK 0`）。
+
+自检之后固件进入主循环，服务原理图画好的器件：
+
+| 器件 | 接线 | 固件行为 |
+| --- | --- | --- |
+| UART 终端 | `RX`→PA9、`TX`→PA10 | 打印报告；终端输入的字会回显并打印 `EVT UART1 RX n` |
+| SPI 灯阵 | `DIN`→PA7、`CLK`→PA5、`CS`→PA4、`DOUT`→PA6 | 上电做 DOUT 回读自检（`DEV MATRIX=OK`），之后每秒在“对号 / 叉号”之间切换 |
+| 旋转编码器 | `A`→PB0、`B`→PB1、`SW`→PB2 | EXTI 解码四分之一相位，转动/按下轴打印 `EVT ENC <steps> <presses>` |
+| LED | `A`→PB12、`K`→GND | 自检时亮 1 ms，之后主循环每 250 ms 翻转 |
+| CAN 收发器 | `TXD`→PA12、`RXD`→PA11 | 回环自检后每 500 ms 以标准帧 `0x123` 发 `"Hello"`；收到的帧打印 `EVT CAN RX`，每秒打印 `EVT CAN STATE TEC=… REC=…`（总线上没有对端时，发送会像真芯片一样报 ACK 错误） |
+| HSE 晶振 | `X1`/`X2`→PD0/PD1 | 决定是否切到 72 MHz PLL |
+| LSE 晶振 | `X1`/`X2`→PC14/PC15 | 起振（约 2 s）后打印 `EVT LSE READY`；报告里先是 `LSE=WAIT` |
+| 电阻 / 示波器 | `CANH`/`CANL` | 终端电阻决定总线质量，示波器看差分波形 |
+
+终端、灯阵、编码器、收发器都要像其它器件一样各接一对 `VCC`/`GND`（没电不工作）。
+
+```powershell
+# 编译固件（需要 arm-none-eabi-gcc 与 CMake）
+cd firmware\CAN
+cmake --preset Debug
+cmake --build --preset Debug        # -> build/Debug/CAN.elf
+
+# 只跑固件、看它打印的报告
+cargo run --release -- run firmware\CAN\build\Debug\CAN.elf -t 3000000 --trace
+
+# 或者打开配套的原理图，在画布上看每个器件跟着固件动
+cargo run -p gsimulator-gui         # 📂 打开工程… docs/selftest.gsim，再 加载 ELF… CAN.elf
+```
+
+`docs/selftest.gsim` 就是上表的接线（终端、LED/编码器、SPI 灯阵、CAN 收发器 + 120 Ω 终端 + 示波器、
+HSE/LSE 晶振、VCC/GND）。
+
 > 注意：`--release` 建议用于长时间运行；debug 构建每秒仿真时间约需数十秒真实时间。
+
+`cargo test -p gsim-cpu` 会逐字节断言上面这份报告（接晶振与不接晶振两种情况），
+`cargo test -p gsimulator-gui --test selftest_firmware` 则把真实 ELF 装进带器件的接线台，
+验证终端、LED、灯阵、编码器与 CAN 对端都能与固件互通。
 
 ### 用 GDB 调试 / 烧录（虚拟 ST-Link）
 
@@ -336,7 +406,7 @@ crates/
   gsim-cpu/       Cortex-M3 执行前端 + ELF 装载 + SoC 桥接
   gsimulator-cli/ 命令行（run / demo / info）
   gsimulator-gui/ 图形前端（虚拟接线台：画布 + 虚拟外设 + 状态面板 + 外设浏览 + CAN 总线窗口 + 示波器）
-firmware/         已有的 CubeMX 固件工程（CAN 回环 + SPI + MAX7219，已在模拟器中跑通）
+firmware/         已有的 CubeMX 固件工程（全外设自检固件，见第 1 节“运行真实 ELF”）
 ```
 
 ### 数据流
@@ -430,6 +500,9 @@ GUI 里这两个器件来自器件库（工具栏 `＋ 添加器件`，或把卡
   以及一帧注入面板（可扮演第二个 ECU，注入的帧真的走线与仲裁）。
 * **示波器窗口**（工具栏 `📈 示波器`）：探头抓到的 `CANH`/`CANL` 电压、差分视图、时基与冻结，
   线路振铃造成的翻转用红色竖线标出（没有放探头时窗口会提示怎么接线）。
+  抓到完整 CAN 帧时，波形下面会多出一条**位标尺**：每个采样位一格，按字段着色（`SOF`/`ID`/`RTR`/
+  `IDE`/`r0`/`DLC`/数据/`CRC`/`ACK`/`EOF`/`IFS`/填充位），悬停显示该位的名字、电平与逻辑值；
+  标尺下方还能逐帧翻看**每一 bit 的定义**（`12·RTR=0` 这种形式）以及帧摘要（ID/DLC/数据/CRC/应答/位数）。
 
 超时复位、看门狗复位都会走同一条 `Soc::system_reset()` 路径，并在 `RCC_CSR` 里留下复位原因。
 
@@ -440,7 +513,7 @@ CAN 不是“帧队列”，而是真实的两线差分总线。这条链路上�
 | 层 | 位置 | 做什么 |
 | --- | --- | --- |
 | 帧编码 | `gsim-core/src/can.rs` | `CanFrame` ↔ `WireFrame`：SOF、标准/扩展标识符、RTR/IDE、DLC、数据、CRC-15（多项式 `x^15+x^14+x^10+x^8+x^7+x^4+x^3+1`）、**位填充**（连续 5 位相同后插一位相反电平，CRC 序列末尾同样会插）、CRC 分隔符、ACK 槽、EOF 与 3 位间歇 |
-| 解码 | `gsim-core/src/can.rs` | `FrameDecoder`：去填充、CRC 校验、ACK 槽、EOF；任何违规立即回报 `Stuff/Crc/Form/Acknowledge/Bit` 错误 |
+| 解码 | `gsim-core/src/can.rs` | `FrameDecoder`：去填充、CRC 校验、ACK 槽、EOF；任何违规立即回报 `Stuff/Crc/Form/Acknowledge/Bit` 错误。`TraceDecoder` 把示波器采到的位流重建成帧，并给**每一位**标上字段（`SOF`/`ID`/`SRR`/`IDE`/`RTR`/`r0`/`DLC`/数据/`CRC`/`ACK`/`EOF`/`IFS`/填充位），只发布走到间歇场的完整帧，所以探头在中途接入也不会画出半帧乱码 |
 | 控制器 | `gsim-stm32f1/src/can.rs` | bxCAN 把邮箱内容逐位移出（`driven_level`），并采样总线（`sample_bit`）：**线与**上出现“自己发隐性、线上是显性”即**仲裁失败**（保留邮箱、置 `TSR.ALSTx`、等总线空闲重试）；接收方在 ACK 槽拉显性，没人应答就是 `Acknowledge` 错误 → 发 6 显性 + 8 隐性的**错误帧**、`TEC += 8`、`REC += 8`，`REC/TEC ≥ 128` 错误被动，`TEC ≥ 256` bus-off（`ABOM` 时等 11 位隐性自动恢复） |
 | 总线 | `gsim-devices/src/can_bus.rs` | 一次一位地推进：所有节点驱动的电平做**线与**（任何显性 → 显性），终端电阻的并联值算出线路质量，质量不够就按概率翻转位（`glitches`）；虚拟节点（注入面板 / 第二个 ECU）跑同一套位机器，所以真的会仲裁、应答、报错 |
 | 接线 | `gsimulator-gui/src/bridge.rs` | 每片仿真时间按 CAN 位时间（`BTR` 决定）切片，每片：读控制器 `driven_level` → `bus.step` → 把采样电平喂回控制器、喂给示波器探头 |

@@ -164,3 +164,98 @@ fn the_scope_window_draws_the_trace_of_a_wired_probe() {
         "the empty window painted nothing"
     );
 }
+
+/// Text the UI painted, so a headless test can assert on the labels.
+fn painted_text(output: &egui::FullOutput) -> Vec<String> {
+    fn collect(shape: &egui::epaint::Shape, texts: &mut Vec<String>) {
+        match shape {
+            egui::epaint::Shape::Text(text) => texts.push(text.galley.text().to_string()),
+            egui::epaint::Shape::Vec(shapes) => {
+                for shape in shapes {
+                    collect(shape, texts);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut texts = Vec::new();
+    for clipped in &output.shapes {
+        collect(&clipped.shape, &mut texts);
+    }
+    texts
+}
+
+#[test]
+fn the_scope_window_captions_every_bit_of_a_captured_frame() {
+    use gsim_core::can::{CanFrame, WireFrame, DOMINANT};
+    use gsim_devices::{ScopeSample, WireLevels};
+    use gsimulator_gui::board::{CAN_CANH, CAN_CANL, SCOPE_CANH, SCOPE_CANL};
+
+    let sim = Simulation::new();
+    let mut snapshot = sim.snapshot();
+    let mut board = Board::new();
+    let transceiver = board.add_can(egui::Pos2::new(400.0, 200.0));
+    let probe = board.add_scope(egui::Pos2::new(760.0, 200.0));
+    for (from, to) in [(CAN_CANH, SCOPE_CANH), (CAN_CANL, SCOPE_CANL)] {
+        board.connect(
+            gsimulator_gui::board::PinRef::Device {
+                device: transceiver,
+                pin: from,
+            },
+            gsimulator_gui::board::PinRef::Device {
+                device: probe,
+                pin: to,
+            },
+        );
+    }
+    let handle = board.scopes()[0].clone();
+    {
+        let mut scope = handle.borrow_mut();
+        scope.set_window_ns(10_000_000);
+        let frame = CanFrame::standard(0x321, b"GSIM");
+        let wire = WireFrame::encode(&frame);
+        for (index, bit) in wire.bits().iter().enumerate() {
+            let level = if index == wire.ack_slot() {
+                DOMINANT
+            } else {
+                *bit
+            };
+            let levels = WireLevels::of(level);
+            scope.record(ScopeSample {
+                time_ns: index as u64 * 4_000,
+                can_h: levels.can_h,
+                can_l: levels.can_l,
+                dominant: level == DOMINANT,
+                glitch: false,
+            });
+        }
+    }
+    board.fill_snapshot(&mut snapshot, &PinLevels::default());
+    assert_eq!(snapshot.scopes[0].frames.len(), 1, "the probe decoded a frame");
+
+    let mut window = ScopeWindow::default();
+    window.open = true;
+    let ctx = egui::Context::default();
+    // Without this the window fades in from zero opacity and paints
+    // `Shape::Noop` placeholders on the first frame.
+    ctx.style_mut(|style| style.animation_time = 0.0);
+    let output = ctx.run(raw_input(), |ctx| {
+        window.show(ctx, &snapshot);
+    });
+    let texts = painted_text(&output);
+    println!("{texts:?}");
+    assert!(
+        texts.iter().any(|text| text == "CAN 帧解码"),
+        "the bit decode area is missing"
+    );
+    for caption in ["0·SOF", "12·RTR", "19·数据0", "EOF0"] {
+        assert!(
+            texts.iter().any(|text| text.contains(caption)),
+            "{caption} is not captioned: {texts:?}"
+        );
+    }
+    assert!(
+        texts.iter().any(|text| text.contains("ID=0x321")),
+        "the decoded identifier is missing: {texts:?}"
+    );
+}

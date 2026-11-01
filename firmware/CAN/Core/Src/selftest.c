@@ -417,10 +417,20 @@ static int st_test_exti(void)
 
 static int st_test_usart1(void)
 {
-  /* The transmitter may still be shifting the line that was just printed, so
-     only the configuration is checked here; TXE/TC are covered by USART2 and
-     USART3 below. */
-  return ((USART1->BRR & 0xFFFFu) == st_console_brr())
+  /* The report is being shifted out right now: wait for TC, which proves both
+     the transmitter and the baud rate derived from BRR work. */
+  int drained = 0;
+  for (uint32_t guard = 0u; guard < 200000u; guard++)
+  {
+    if ((USART1->SR & USART_SR_TC) != 0u)
+    {
+      drained = 1;
+      break;
+    }
+  }
+
+  return drained
+      && ((USART1->BRR & 0xFFFFu) == st_console_brr())
       && ((USART1->CR1 & (USART_CR1_UE | USART_CR1_TE)) == (USART_CR1_UE | USART_CR1_TE));
 }
 
@@ -1084,19 +1094,9 @@ void st_service_watchdogs(void)
 
 static const char *st_reset_cause(void)
 {
+  /* A watchdog reset also leaves the power-on flag behind in this model, so
+     the specific causes are reported before `POR`. */
   uint32_t csr = RCC->CSR;
-  if ((csr & RCC_CSR_PORRSTF) != 0u)
-  {
-    return "POR";
-  }
-  if ((csr & RCC_CSR_PINRSTF) != 0u)
-  {
-    return "PIN";
-  }
-  if ((csr & RCC_CSR_SFTRSTF) != 0u)
-  {
-    return "SOFT";
-  }
   if ((csr & RCC_CSR_IWDGRSTF) != 0u)
   {
     return "IWDG";
@@ -1105,9 +1105,21 @@ static const char *st_reset_cause(void)
   {
     return "WWDG";
   }
+  if ((csr & RCC_CSR_SFTRSTF) != 0u)
+  {
+    return "SOFT";
+  }
+  if ((csr & RCC_CSR_PINRSTF) != 0u)
+  {
+    return "PIN";
+  }
   if ((csr & RCC_CSR_LPWRRSTF) != 0u)
   {
     return "LOWPOWER";
+  }
+  if ((csr & RCC_CSR_PORRSTF) != 0u)
+  {
+    return "POR";
   }
   return "NONE";
 }

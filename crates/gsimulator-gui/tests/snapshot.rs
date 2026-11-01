@@ -36,8 +36,9 @@ fn window_renders_offscreen() {
 
     assert_eq!(image.width(), 1440);
     assert_eq!(image.height(), 900);
-    // The canvas background must have been painted (dark blue-grey).
-    let pixel = image.get_pixel(600, 600).0;
+    // The canvas background must have been painted (dark blue-grey); sample a
+    // corner so the fitted MCU symbol can never cover it.
+    let pixel = image.get_pixel(20, 840).0;
     assert!(
         pixel[0] < 70 && pixel[1] < 75 && pixel[2] < 85,
         "canvas background looks wrong: {pixel:?}"

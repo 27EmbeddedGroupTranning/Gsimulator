@@ -68,10 +68,11 @@ static uint16_t max7219_read_back(void)
 
 int MAX7219_Detect(uint16_t *echo)
 {
-  /* Write a harmless register, let the simulation service the part, then read
-     the word it shifted out on DOUT. */
-  max7219_write(s_echo_word, 0x0AU);
-  st_delay_ms(1U);
+  /* Write the intensity register again (a harmless word), give the harness time
+     to hand the transfer to the part (it services the devices between
+     simulation slices) and then read the word it shifted out on DOUT. */
+  max7219_write(s_echo_word, MAX7219_INTENSITY);
+  st_delay_ms(5U);
 
   *echo = max7219_read_back();
   return (*echo >> 8) == s_echo_word || (*echo & 0xFFU) == s_echo_word;

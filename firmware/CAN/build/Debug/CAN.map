@@ -2649,7 +2649,7 @@ LOAD C:/PROGRA~2/ARMGNU~1/142BCE~1.3RE/bin/../lib/gcc/arm-none-eabi/14.3.1/thumb
                 0x08000000                g_pfnVectors
                 0x0800010c                        . = ALIGN (0x4)
 
-.text           0x0800010c     0x290c
+.text           0x0800010c     0x2948
                 0x0800010c                        . = ALIGN (0x4)
  *(.text)
  *(.text*)
@@ -2899,154 +2899,154 @@ LOAD C:/PROGRA~2/ARMGNU~1/142BCE~1.3RE/bin/../lib/gcc/arm-none-eabi/14.3.1/thumb
  .text.st_test_exti
                 0x08001408       0xa4 CMakeFiles/CAN.dir/Core/Src/selftest.c.obj
  .text.st_test_usart1
-                0x080014ac       0x34 CMakeFiles/CAN.dir/Core/Src/selftest.c.obj
+                0x080014ac       0x70 CMakeFiles/CAN.dir/Core/Src/selftest.c.obj
  .text.st_test_usart_port
-                0x080014e0       0xa0 CMakeFiles/CAN.dir/Core/Src/selftest.c.obj
+                0x0800151c       0xa0 CMakeFiles/CAN.dir/Core/Src/selftest.c.obj
  .text.st_spi_byte
-                0x08001580       0x70 CMakeFiles/CAN.dir/Core/Src/selftest.c.obj
+                0x080015bc       0x70 CMakeFiles/CAN.dir/Core/Src/selftest.c.obj
  .text.st_test_spi
-                0x080015f0       0xe8 CMakeFiles/CAN.dir/Core/Src/selftest.c.obj
+                0x0800162c       0xe8 CMakeFiles/CAN.dir/Core/Src/selftest.c.obj
  .text.st_test_i2c
-                0x080016d8      0x19c CMakeFiles/CAN.dir/Core/Src/selftest.c.obj
+                0x08001714      0x19c CMakeFiles/CAN.dir/Core/Src/selftest.c.obj
  .text.st_test_tim1
-                0x08001874       0xbc CMakeFiles/CAN.dir/Core/Src/selftest.c.obj
+                0x080018b0       0xbc CMakeFiles/CAN.dir/Core/Src/selftest.c.obj
  .text.st_test_tim2
-                0x08001930       0xd4 CMakeFiles/CAN.dir/Core/Src/selftest.c.obj
+                0x0800196c       0xd4 CMakeFiles/CAN.dir/Core/Src/selftest.c.obj
  .text.st_test_tim3
-                0x08001a04       0xb4 CMakeFiles/CAN.dir/Core/Src/selftest.c.obj
+                0x08001a40       0xb4 CMakeFiles/CAN.dir/Core/Src/selftest.c.obj
  .text.st_test_tim4
-                0x08001ab8       0x80 CMakeFiles/CAN.dir/Core/Src/selftest.c.obj
+                0x08001af4       0x80 CMakeFiles/CAN.dir/Core/Src/selftest.c.obj
  .text.st_adc_configure
-                0x08001b38       0x48 CMakeFiles/CAN.dir/Core/Src/selftest.c.obj
+                0x08001b74       0x48 CMakeFiles/CAN.dir/Core/Src/selftest.c.obj
  .text.st_test_adc
-                0x08001b80       0x88 CMakeFiles/CAN.dir/Core/Src/selftest.c.obj
+                0x08001bbc       0x88 CMakeFiles/CAN.dir/Core/Src/selftest.c.obj
  .text.st_test_dma
-                0x08001c08      0x17c CMakeFiles/CAN.dir/Core/Src/selftest.c.obj
+                0x08001c44      0x17c CMakeFiles/CAN.dir/Core/Src/selftest.c.obj
  .text.st_test_flash
-                0x08001d84      0x138 CMakeFiles/CAN.dir/Core/Src/selftest.c.obj
+                0x08001dc0      0x138 CMakeFiles/CAN.dir/Core/Src/selftest.c.obj
  .text.st_test_crc
-                0x08001ebc       0x54 CMakeFiles/CAN.dir/Core/Src/selftest.c.obj
+                0x08001ef8       0x54 CMakeFiles/CAN.dir/Core/Src/selftest.c.obj
  .text.st_test_rtc
-                0x08001f10      0x1bc CMakeFiles/CAN.dir/Core/Src/selftest.c.obj
+                0x08001f4c      0x1bc CMakeFiles/CAN.dir/Core/Src/selftest.c.obj
  .text.st_test_bkp
-                0x080020cc       0x3c CMakeFiles/CAN.dir/Core/Src/selftest.c.obj
+                0x08002108       0x3c CMakeFiles/CAN.dir/Core/Src/selftest.c.obj
  .text.st_test_pwr
-                0x08002108       0x84 CMakeFiles/CAN.dir/Core/Src/selftest.c.obj
+                0x08002144       0x84 CMakeFiles/CAN.dir/Core/Src/selftest.c.obj
  .text.st_can_rx_irq
-                0x0800218c       0x1c CMakeFiles/CAN.dir/Core/Src/selftest.c.obj
-                0x0800218c                st_can_rx_irq
+                0x080021c8       0x1c CMakeFiles/CAN.dir/Core/Src/selftest.c.obj
+                0x080021c8                st_can_rx_irq
  .text.st_can_irq_count
-                0x080021a8       0x14 CMakeFiles/CAN.dir/Core/Src/selftest.c.obj
-                0x080021a8                st_can_irq_count
+                0x080021e4       0x14 CMakeFiles/CAN.dir/Core/Src/selftest.c.obj
+                0x080021e4                st_can_irq_count
  .text.st_test_can
-                0x080021bc      0x298 CMakeFiles/CAN.dir/Core/Src/selftest.c.obj
+                0x080021f8      0x298 CMakeFiles/CAN.dir/Core/Src/selftest.c.obj
  .text.st_test_iwdg
-                0x08002454       0x88 CMakeFiles/CAN.dir/Core/Src/selftest.c.obj
+                0x08002490       0x88 CMakeFiles/CAN.dir/Core/Src/selftest.c.obj
  .text.st_wwdg_refresh
-                0x080024dc       0x18 CMakeFiles/CAN.dir/Core/Src/selftest.c.obj
+                0x08002518       0x18 CMakeFiles/CAN.dir/Core/Src/selftest.c.obj
  .text.st_test_wwdg
-                0x080024f4       0xc8 CMakeFiles/CAN.dir/Core/Src/selftest.c.obj
+                0x08002530       0xc8 CMakeFiles/CAN.dir/Core/Src/selftest.c.obj
  .text.st_service_watchdogs
-                0x080025bc       0x18 CMakeFiles/CAN.dir/Core/Src/selftest.c.obj
-                0x080025bc                st_service_watchdogs
+                0x080025f8       0x18 CMakeFiles/CAN.dir/Core/Src/selftest.c.obj
+                0x080025f8                st_service_watchdogs
  .text.st_reset_cause
-                0x080025d4       0x88 CMakeFiles/CAN.dir/Core/Src/selftest.c.obj
+                0x08002610       0x88 CMakeFiles/CAN.dir/Core/Src/selftest.c.obj
  .text.st_run_selftest
-                0x0800265c      0x35c CMakeFiles/CAN.dir/Core/Src/selftest.c.obj
-                0x0800265c                st_run_selftest
+                0x08002698      0x35c CMakeFiles/CAN.dir/Core/Src/selftest.c.obj
+                0x08002698                st_run_selftest
  .text.__libc_init_array
-                0x080029b8       0x48 C:/PROGRA~2/ARMGNU~1/142BCE~1.3RE/bin/../lib/gcc/arm-none-eabi/14.3.1/../../../../arm-none-eabi/lib/thumb/v7-m/nofp\libg_nano.a(libc_a-init.o)
-                0x080029b8                __libc_init_array
+                0x080029f4       0x48 C:/PROGRA~2/ARMGNU~1/142BCE~1.3RE/bin/../lib/gcc/arm-none-eabi/14.3.1/../../../../arm-none-eabi/lib/thumb/v7-m/nofp\libg_nano.a(libc_a-init.o)
+                0x080029f4                __libc_init_array
  *(.glue_7)
- .glue_7        0x08002a00        0x0 linker stubs
+ .glue_7        0x08002a3c        0x0 linker stubs
  *(.glue_7t)
- .glue_7t       0x08002a00        0x0 linker stubs
+ .glue_7t       0x08002a3c        0x0 linker stubs
  *(.eh_frame)
- .eh_frame      0x08002a00        0x0 C:/PROGRA~2/ARMGNU~1/142BCE~1.3RE/bin/../lib/gcc/arm-none-eabi/14.3.1/thumb/v7-m/nofp/crtbegin.o
+ .eh_frame      0x08002a3c        0x0 C:/PROGRA~2/ARMGNU~1/142BCE~1.3RE/bin/../lib/gcc/arm-none-eabi/14.3.1/thumb/v7-m/nofp/crtbegin.o
  *(.init)
- .init          0x08002a00        0x4 C:/PROGRA~2/ARMGNU~1/142BCE~1.3RE/bin/../lib/gcc/arm-none-eabi/14.3.1/thumb/v7-m/nofp/crti.o
-                0x08002a00                _init
- .init          0x08002a04        0x8 C:/PROGRA~2/ARMGNU~1/142BCE~1.3RE/bin/../lib/gcc/arm-none-eabi/14.3.1/thumb/v7-m/nofp/crtn.o
+ .init          0x08002a3c        0x4 C:/PROGRA~2/ARMGNU~1/142BCE~1.3RE/bin/../lib/gcc/arm-none-eabi/14.3.1/thumb/v7-m/nofp/crti.o
+                0x08002a3c                _init
+ .init          0x08002a40        0x8 C:/PROGRA~2/ARMGNU~1/142BCE~1.3RE/bin/../lib/gcc/arm-none-eabi/14.3.1/thumb/v7-m/nofp/crtn.o
  *(.fini)
- .fini          0x08002a0c        0x4 C:/PROGRA~2/ARMGNU~1/142BCE~1.3RE/bin/../lib/gcc/arm-none-eabi/14.3.1/thumb/v7-m/nofp/crti.o
-                0x08002a0c                _fini
- .fini          0x08002a10        0x8 C:/PROGRA~2/ARMGNU~1/142BCE~1.3RE/bin/../lib/gcc/arm-none-eabi/14.3.1/thumb/v7-m/nofp/crtn.o
-                0x08002a18                        . = ALIGN (0x4)
-                0x08002a18                        _etext = .
+ .fini          0x08002a48        0x4 C:/PROGRA~2/ARMGNU~1/142BCE~1.3RE/bin/../lib/gcc/arm-none-eabi/14.3.1/thumb/v7-m/nofp/crti.o
+                0x08002a48                _fini
+ .fini          0x08002a4c        0x8 C:/PROGRA~2/ARMGNU~1/142BCE~1.3RE/bin/../lib/gcc/arm-none-eabi/14.3.1/thumb/v7-m/nofp/crtn.o
+                0x08002a54                        . = ALIGN (0x4)
+                0x08002a54                        _etext = .
 
-.vfp11_veneer   0x08002a18        0x0
- .vfp11_veneer  0x08002a18        0x0 linker stubs
+.vfp11_veneer   0x08002a54        0x0
+ .vfp11_veneer  0x08002a54        0x0 linker stubs
 
-.v4_bx          0x08002a18        0x0
- .v4_bx         0x08002a18        0x0 linker stubs
+.v4_bx          0x08002a54        0x0
+ .v4_bx         0x08002a54        0x0 linker stubs
 
-.iplt           0x08002a18        0x0
- .iplt          0x08002a18        0x0 C:/PROGRA~2/ARMGNU~1/142BCE~1.3RE/bin/../lib/gcc/arm-none-eabi/14.3.1/thumb/v7-m/nofp/crtbegin.o
+.iplt           0x08002a54        0x0
+ .iplt          0x08002a54        0x0 C:/PROGRA~2/ARMGNU~1/142BCE~1.3RE/bin/../lib/gcc/arm-none-eabi/14.3.1/thumb/v7-m/nofp/crtbegin.o
 
-.rodata         0x08002a18      0x230
-                0x08002a18                        . = ALIGN (0x4)
+.rodata         0x08002a54      0x230
+                0x08002a54                        . = ALIGN (0x4)
  *(.rodata)
- .rodata        0x08002a18       0xa6 CMakeFiles/CAN.dir/Core/Src/main.c.obj
- *fill*         0x08002abe        0x2 
- .rodata        0x08002ac0      0x156 CMakeFiles/CAN.dir/Core/Src/selftest.c.obj
+ .rodata        0x08002a54       0xa6 CMakeFiles/CAN.dir/Core/Src/main.c.obj
+ *fill*         0x08002afa        0x2 
+ .rodata        0x08002afc      0x156 CMakeFiles/CAN.dir/Core/Src/selftest.c.obj
  *(.rodata*)
- *fill*         0x08002c16        0x2 
+ *fill*         0x08002c52        0x2 
  .rodata.s_matrix_cross
-                0x08002c18        0x8 CMakeFiles/CAN.dir/Core/Src/main.c.obj
+                0x08002c54        0x8 CMakeFiles/CAN.dir/Core/Src/main.c.obj
  .rodata.grey_index.1
-                0x08002c20        0x4 CMakeFiles/CAN.dir/Core/Src/main.c.obj
+                0x08002c5c        0x4 CMakeFiles/CAN.dir/Core/Src/main.c.obj
  .rodata.payload.0
-                0x08002c24        0x5 CMakeFiles/CAN.dir/Core/Src/main.c.obj
- *fill*         0x08002c29        0x3 
+                0x08002c60        0x5 CMakeFiles/CAN.dir/Core/Src/main.c.obj
+ *fill*         0x08002c65        0x3 
  .rodata.max7219_check_img
-                0x08002c2c        0x8 CMakeFiles/CAN.dir/Core/Src/max7219.c.obj
+                0x08002c68        0x8 CMakeFiles/CAN.dir/Core/Src/max7219.c.obj
  .rodata.digits.0
-                0x08002c34       0x11 CMakeFiles/CAN.dir/Core/Src/selftest.c.obj
-                0x08002c48                        . = ALIGN (0x4)
- *fill*         0x08002c45        0x3 
+                0x08002c70       0x11 CMakeFiles/CAN.dir/Core/Src/selftest.c.obj
+                0x08002c84                        . = ALIGN (0x4)
+ *fill*         0x08002c81        0x3 
 
-.ARM.extab      0x08002c48        0x0
-                0x08002c48                        . = ALIGN (0x4)
+.ARM.extab      0x08002c84        0x0
+                0x08002c84                        . = ALIGN (0x4)
  *(.ARM.extab* .gnu.linkonce.armextab.*)
-                0x08002c48                        . = ALIGN (0x4)
+                0x08002c84                        . = ALIGN (0x4)
 
-.ARM            0x08002c48        0x0
-                0x08002c48                        . = ALIGN (0x4)
-                0x08002c48                        __exidx_start = .
+.ARM            0x08002c84        0x0
+                0x08002c84                        . = ALIGN (0x4)
+                0x08002c84                        __exidx_start = .
  *(.ARM.exidx*)
-                0x08002c48                        __exidx_end = .
-                0x08002c48                        . = ALIGN (0x4)
+                0x08002c84                        __exidx_end = .
+                0x08002c84                        . = ALIGN (0x4)
 
-.preinit_array  0x08002c48        0x0
-                0x08002c48                        . = ALIGN (0x4)
-                0x08002c48                        PROVIDE (__preinit_array_start = .)
+.preinit_array  0x08002c84        0x0
+                0x08002c84                        . = ALIGN (0x4)
+                0x08002c84                        PROVIDE (__preinit_array_start = .)
  *(.preinit_array*)
-                0x08002c48                        PROVIDE (__preinit_array_end = .)
-                0x08002c48                        . = ALIGN (0x4)
+                0x08002c84                        PROVIDE (__preinit_array_end = .)
+                0x08002c84                        . = ALIGN (0x4)
 
-.init_array     0x08002c48        0x4
-                0x08002c48                        . = ALIGN (0x4)
-                0x08002c48                        PROVIDE (__init_array_start = .)
+.init_array     0x08002c84        0x4
+                0x08002c84                        . = ALIGN (0x4)
+                0x08002c84                        PROVIDE (__init_array_start = .)
  *(SORT_BY_NAME(.init_array.*))
  *(.init_array*)
- .init_array    0x08002c48        0x4 C:/PROGRA~2/ARMGNU~1/142BCE~1.3RE/bin/../lib/gcc/arm-none-eabi/14.3.1/thumb/v7-m/nofp/crtbegin.o
-                0x08002c4c                        PROVIDE (__init_array_end = .)
-                0x08002c4c                        . = ALIGN (0x4)
+ .init_array    0x08002c84        0x4 C:/PROGRA~2/ARMGNU~1/142BCE~1.3RE/bin/../lib/gcc/arm-none-eabi/14.3.1/thumb/v7-m/nofp/crtbegin.o
+                0x08002c88                        PROVIDE (__init_array_end = .)
+                0x08002c88                        . = ALIGN (0x4)
 
-.fini_array     0x08002c4c        0x4
-                0x08002c4c                        . = ALIGN (0x4)
+.fini_array     0x08002c88        0x4
+                0x08002c88                        . = ALIGN (0x4)
                 [!provide]                        PROVIDE (__fini_array_start = .)
  *(SORT_BY_NAME(.fini_array.*))
  *(.fini_array*)
- .fini_array    0x08002c4c        0x4 C:/PROGRA~2/ARMGNU~1/142BCE~1.3RE/bin/../lib/gcc/arm-none-eabi/14.3.1/thumb/v7-m/nofp/crtbegin.o
+ .fini_array    0x08002c88        0x4 C:/PROGRA~2/ARMGNU~1/142BCE~1.3RE/bin/../lib/gcc/arm-none-eabi/14.3.1/thumb/v7-m/nofp/crtbegin.o
                 [!provide]                        PROVIDE (__fini_array_end = .)
-                0x08002c50                        . = ALIGN (0x4)
-                0x08002c50                        _sidata = LOADADDR (.data)
+                0x08002c8c                        . = ALIGN (0x4)
+                0x08002c8c                        _sidata = LOADADDR (.data)
 
-.rel.dyn        0x08002c50        0x0
- .rel.iplt      0x08002c50        0x0 C:/PROGRA~2/ARMGNU~1/142BCE~1.3RE/bin/../lib/gcc/arm-none-eabi/14.3.1/thumb/v7-m/nofp/crtbegin.o
+.rel.dyn        0x08002c8c        0x0
+ .rel.iplt      0x08002c8c        0x0 C:/PROGRA~2/ARMGNU~1/142BCE~1.3RE/bin/../lib/gcc/arm-none-eabi/14.3.1/thumb/v7-m/nofp/crtbegin.o
 
-.data           0x20000000       0x10 load address 0x08002c50
+.data           0x20000000       0x10 load address 0x08002c8c
                 0x20000000                        . = ALIGN (0x4)
                 0x20000000                        _sdata = .
  *(.data)
@@ -3058,16 +3058,16 @@ LOAD C:/PROGRA~2/ARMGNU~1/142BCE~1.3RE/bin/../lib/gcc/arm-none-eabi/14.3.1/thumb
                 0x20000010                        . = ALIGN (0x4)
 
 .tm_clone_table
-                0x20000010        0x0 load address 0x08002c60
+                0x20000010        0x0 load address 0x08002c9c
  .tm_clone_table
                 0x20000010        0x0 C:/PROGRA~2/ARMGNU~1/142BCE~1.3RE/bin/../lib/gcc/arm-none-eabi/14.3.1/thumb/v7-m/nofp/crtbegin.o
  .tm_clone_table
                 0x20000010        0x0 C:/PROGRA~2/ARMGNU~1/142BCE~1.3RE/bin/../lib/gcc/arm-none-eabi/14.3.1/thumb/v7-m/nofp/crtend.o
 
-.igot.plt       0x20000010        0x0 load address 0x08002c60
+.igot.plt       0x20000010        0x0 load address 0x08002c9c
  .igot.plt      0x20000010        0x0 C:/PROGRA~2/ARMGNU~1/142BCE~1.3RE/bin/../lib/gcc/arm-none-eabi/14.3.1/thumb/v7-m/nofp/crtbegin.o
 
-.tdata          0x20000010        0x0 load address 0x08002c60
+.tdata          0x20000010        0x0 load address 0x08002c9c
  *(.tdata .tdata.* .gnu.linkonce.td.*)
                 0x20000010                        . = ALIGN (0x4)
                 0x20000010                        _edata = .
@@ -3084,7 +3084,7 @@ LOAD C:/PROGRA~2/ARMGNU~1/142BCE~1.3RE/bin/../lib/gcc/arm-none-eabi/14.3.1/thumb
                 [!provide]                        PROVIDE (__data_source_end = __tdata_source_end)
                 [!provide]                        PROVIDE (__data_source_size = (__data_source_end - __data_source))
 
-.tbss           0x20000010        0x0 load address 0x08002c60
+.tbss           0x20000010        0x0 load address 0x08002c9c
                 0x20000010                        _sbss = .
                 0x20000010                        __bss_start__ = _sbss
  *(.tbss .tbss.*)
@@ -3101,7 +3101,7 @@ LOAD C:/PROGRA~2/ARMGNU~1/142BCE~1.3RE/bin/../lib/gcc/arm-none-eabi/14.3.1/thumb
                 [!provide]                        PROVIDE (__arm32_tls_tcb_offset = MAX (0x8, __tls_align))
                 [!provide]                        PROVIDE (__arm64_tls_tcb_offset = MAX (0x10, __tls_align))
 
-.bss            0x20000010       0xb8 load address 0x08002c60
+.bss            0x20000010       0xb8 load address 0x08002c9c
  *(.bss)
  *(.bss*)
  .bss.completed.1
@@ -3160,7 +3160,7 @@ LOAD C:/PROGRA~2/ARMGNU~1/142BCE~1.3RE/bin/../lib/gcc/arm-none-eabi/14.3.1/thumb
                 [!provide]                        PROVIDE (__bss_size = (__bss_end - __bss_start))
 
 ._user_heap_stack
-                0x200000c8      0x600 load address 0x08002c60
+                0x200000c8      0x600 load address 0x08002c9c
                 0x200000c8                        . = ALIGN (0x8)
                 [!provide]                        PROVIDE (end = .)
                 0x200000c8                        PROVIDE (_end = .)
@@ -3210,21 +3210,21 @@ LOAD linker stubs
  .comment       0x00000046       0x47 CMakeFiles/CAN.dir/Core/Src/max7219.c.obj
  .comment       0x00000046       0x47 CMakeFiles/CAN.dir/Core/Src/selftest.c.obj
 
-.debug_info     0x00000000     0x37b4
+.debug_info     0x00000000     0x37df
  .debug_info    0x00000000      0x222 cmake/stm32cubemx/CMakeFiles/STM32_Drivers.dir/__/__/Core/Src/system_stm32f1xx.c.obj
  .debug_info    0x00000222     0x1006 CMakeFiles/CAN.dir/Core/Src/main.c.obj
  .debug_info    0x00001228      0x192 CMakeFiles/CAN.dir/Core/Src/stm32f1xx_it.c.obj
  .debug_info    0x000013ba       0x30 CMakeFiles/CAN.dir/startup_stm32f103xb.s.obj
  .debug_info    0x000013ea      0x413 CMakeFiles/CAN.dir/Core/Src/max7219.c.obj
- .debug_info    0x000017fd     0x1fb7 CMakeFiles/CAN.dir/Core/Src/selftest.c.obj
+ .debug_info    0x000017fd     0x1fe2 CMakeFiles/CAN.dir/Core/Src/selftest.c.obj
 
-.debug_abbrev   0x00000000      0xb71
+.debug_abbrev   0x00000000      0xb58
  .debug_abbrev  0x00000000      0x13f cmake/stm32cubemx/CMakeFiles/STM32_Drivers.dir/__/__/Core/Src/system_stm32f1xx.c.obj
  .debug_abbrev  0x0000013f      0x3a5 CMakeFiles/CAN.dir/Core/Src/main.c.obj
  .debug_abbrev  0x000004e4       0x76 CMakeFiles/CAN.dir/Core/Src/stm32f1xx_it.c.obj
  .debug_abbrev  0x0000055a       0x24 CMakeFiles/CAN.dir/startup_stm32f103xb.s.obj
  .debug_abbrev  0x0000057e      0x1ee CMakeFiles/CAN.dir/Core/Src/max7219.c.obj
- .debug_abbrev  0x0000076c      0x405 CMakeFiles/CAN.dir/Core/Src/selftest.c.obj
+ .debug_abbrev  0x0000076c      0x3ec CMakeFiles/CAN.dir/Core/Src/selftest.c.obj
 
 .debug_aranges  0x00000000      0x3e0
  .debug_aranges
@@ -3302,30 +3302,30 @@ LOAD linker stubs
  .debug_macro   0x00015a7f      0x1f0 CMakeFiles/CAN.dir/Core/Src/selftest.c.obj
  .debug_macro   0x00015c6f       0x16 CMakeFiles/CAN.dir/Core/Src/selftest.c.obj
 
-.debug_line     0x00000000     0x3970
+.debug_line     0x00000000     0x399f
  .debug_line    0x00000000      0x60d cmake/stm32cubemx/CMakeFiles/STM32_Drivers.dir/__/__/Core/Src/system_stm32f1xx.c.obj
  .debug_line    0x0000060d      0xa1a CMakeFiles/CAN.dir/Core/Src/main.c.obj
  .debug_line    0x00001027      0x6de CMakeFiles/CAN.dir/Core/Src/stm32f1xx_it.c.obj
  .debug_line    0x00001705       0x78 CMakeFiles/CAN.dir/startup_stm32f103xb.s.obj
  .debug_line    0x0000177d      0x7b4 CMakeFiles/CAN.dir/Core/Src/max7219.c.obj
- .debug_line    0x00001f31     0x1a3f CMakeFiles/CAN.dir/Core/Src/selftest.c.obj
+ .debug_line    0x00001f31     0x1a6e CMakeFiles/CAN.dir/Core/Src/selftest.c.obj
 
-.debug_str      0x00000000    0x7f583
- .debug_str     0x00000000    0x7f583 cmake/stm32cubemx/CMakeFiles/STM32_Drivers.dir/__/__/Core/Src/system_stm32f1xx.c.obj
+.debug_str      0x00000000    0x7f58b
+ .debug_str     0x00000000    0x7f58b cmake/stm32cubemx/CMakeFiles/STM32_Drivers.dir/__/__/Core/Src/system_stm32f1xx.c.obj
                               0x7e3ee (size before relaxing)
- .debug_str     0x0007f583    0x7ef0c CMakeFiles/CAN.dir/Core/Src/main.c.obj
- .debug_str     0x0007f583    0x7e4f0 CMakeFiles/CAN.dir/Core/Src/stm32f1xx_it.c.obj
- .debug_str     0x0007f583       0x9c CMakeFiles/CAN.dir/startup_stm32f103xb.s.obj
- .debug_str     0x0007f583    0x7e679 CMakeFiles/CAN.dir/Core/Src/max7219.c.obj
- .debug_str     0x0007f583    0x7f1ac CMakeFiles/CAN.dir/Core/Src/selftest.c.obj
+ .debug_str     0x0007f58b    0x7ef0c CMakeFiles/CAN.dir/Core/Src/main.c.obj
+ .debug_str     0x0007f58b    0x7e4f0 CMakeFiles/CAN.dir/Core/Src/stm32f1xx_it.c.obj
+ .debug_str     0x0007f58b       0x9c CMakeFiles/CAN.dir/startup_stm32f103xb.s.obj
+ .debug_str     0x0007f58b    0x7e679 CMakeFiles/CAN.dir/Core/Src/max7219.c.obj
+ .debug_str     0x0007f58b    0x7f1b4 CMakeFiles/CAN.dir/Core/Src/selftest.c.obj
 
-.debug_frame    0x00000000      0xe6c
+.debug_frame    0x00000000      0xe74
  .debug_frame   0x00000000       0x58 cmake/stm32cubemx/CMakeFiles/STM32_Drivers.dir/__/__/Core/Src/system_stm32f1xx.c.obj
  .debug_frame   0x00000058      0x28c CMakeFiles/CAN.dir/Core/Src/main.c.obj
  .debug_frame   0x000002e4      0x1ac CMakeFiles/CAN.dir/Core/Src/stm32f1xx_it.c.obj
  .debug_frame   0x00000490      0x1a4 CMakeFiles/CAN.dir/Core/Src/max7219.c.obj
- .debug_frame   0x00000634      0x80c CMakeFiles/CAN.dir/Core/Src/selftest.c.obj
- .debug_frame   0x00000e40       0x2c C:/PROGRA~2/ARMGNU~1/142BCE~1.3RE/bin/../lib/gcc/arm-none-eabi/14.3.1/../../../../arm-none-eabi/lib/thumb/v7-m/nofp\libg_nano.a(libc_a-init.o)
+ .debug_frame   0x00000634      0x814 CMakeFiles/CAN.dir/Core/Src/selftest.c.obj
+ .debug_frame   0x00000e48       0x2c C:/PROGRA~2/ARMGNU~1/142BCE~1.3RE/bin/../lib/gcc/arm-none-eabi/14.3.1/../../../../arm-none-eabi/lib/thumb/v7-m/nofp\libg_nano.a(libc_a-init.o)
 
 .debug_line_str
                 0x00000000       0x80

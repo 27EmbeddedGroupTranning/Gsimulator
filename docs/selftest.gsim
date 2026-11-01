@@ -1,0 +1,47 @@
+# 外设自检固件的演示接线（firmware/CAN/build/Debug/CAN.elf）
+#
+#   cargo run -p gsimulator-gui
+#   -> 「📂 打开工程…」选这个文件，再「加载 ELF…」选 CAN.elf，然后「运行」
+#
+# 终端、灯阵、编码器、CAN 收发器都要 VCC/GND；两颗晶振接在振荡脚上才会起振。
+gsimulator project 1
+device 1 vcc -140.00 60.00
+device 2 gnd -140.00 620.00
+device 3 uart -60.00 90.00 unit=0
+device 4 matrix 520.00 -40.00
+device 5 encoder -60.00 330.00
+device 6 led 300.00 200.00
+device 7 can 520.00 330.00 mode=normal
+device 8 resistor 760.00 420.00 ohms=120
+device 9 scope 880.00 330.00 window=20000 frozen=0
+device 10 hse -260.00 150.00
+device 11 lse 300.00 620.00
+wire dev:3:0 mcu:0:9
+wire dev:3:1 mcu:0:10
+wire dev:3:2 dev:1:0
+wire dev:3:3 dev:2:0
+wire dev:4:0 mcu:0:7
+wire dev:4:1 mcu:0:5
+wire dev:4:2 mcu:0:4
+wire dev:4:3 mcu:0:6
+wire dev:4:4 dev:1:0
+wire dev:4:5 dev:2:0
+wire dev:5:0 mcu:1:0
+wire dev:5:1 mcu:1:1
+wire dev:5:2 mcu:1:2
+wire dev:5:3 dev:1:0
+wire dev:5:4 dev:2:0
+wire dev:6:0 mcu:1:12
+wire dev:6:1 dev:2:0
+wire dev:7:0 mcu:0:12
+wire dev:7:1 mcu:0:11
+wire dev:7:2 dev:8:0
+wire dev:7:3 dev:8:1
+wire dev:7:4 dev:1:0
+wire dev:7:5 dev:2:0
+wire dev:8:0 dev:9:0
+wire dev:8:1 dev:9:1
+wire dev:10:0 mcu:3:0
+wire dev:10:1 mcu:3:1
+wire dev:11:0 mcu:2:14
+wire dev:11:1 mcu:2:15

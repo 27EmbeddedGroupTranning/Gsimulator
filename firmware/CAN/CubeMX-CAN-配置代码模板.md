@@ -1,3 +1,7 @@
+> 说明：本文是**用 HAL 写 CAN 外设**的 CubeMX 参考模板，保留作对照。
+> 工程里当前的 Core/Src/main.c 已改成不依赖 HAL 的全外设自检固件
+> （见仓库根目录 README.md 第 1 节“运行真实 ELF”），CAN1 的寄存器序列在
+> Core/Src/selftest.c::st_test_can() 里。
 # CubeMX 配好工程后：CAN 代码模板
 
 > 前提：CubeMX 已勾选 CAN1，并已使能 `USB low priority or CAN1 RX0` 中断。

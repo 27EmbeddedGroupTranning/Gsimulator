@@ -17,6 +17,7 @@ use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
+use gsim_core::can::TraceFrame;
 use gsim_core::{AccessWidth, Clocks, Event, MemoryBus};
 use gsim_cpu::{Cpu, CpuError, ElfImage, RunError, StopReason};
 use gsim_devices::{
@@ -301,6 +302,8 @@ pub struct ScopeView {
     pub window_ns: u64,
     /// Stored samples, oldest first.
     pub samples: Vec<ScopeSample>,
+    /// Frames the probe rebuilt from those samples, oldest first.
+    pub frames: Vec<TraceFrame>,
     pub frozen: bool,
     /// Samples the wire could not carry cleanly.
     pub glitches: u64,
@@ -315,10 +318,33 @@ impl ScopeView {
             name: scope.name().to_string(),
             window_ns: scope.window_ns(),
             samples: scope.samples().iter().copied().collect(),
+            frames: scope.frames().iter().cloned().collect(),
             frozen: scope.frozen(),
             glitches: scope.glitches(),
             peak: scope.peak_differential(),
         }
+    }
+
+    /// Frames that overlap the visible part of the trace.
+    pub fn visible_frames(&self) -> impl Iterator<Item = &TraceFrame> {
+        let (first, last) = self
+            .span()
+            .or_else(|| {
+                let frame = self.frames.first()?;
+                Some((frame.start_ns, frame.end_ns))
+            })
+            .unwrap_or((0, 0));
+        self.frames
+            .iter()
+            .filter(move |frame| frame.end_ns >= first && frame.start_ns <= last)
+    }
+
+    /// Simulated time the stored trace covers, `None` when it is empty.
+    pub fn span(&self) -> Option<(u64, u64)> {
+        Some((
+            self.samples.first()?.time_ns,
+            self.samples.last()?.time_ns,
+        ))
     }
 }
 

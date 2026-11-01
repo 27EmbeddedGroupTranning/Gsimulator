@@ -7,6 +7,7 @@
 
 use eframe::egui;
 use egui::{Color32, Pos2, Rect, RichText, Stroke, Vec2};
+use gsim_core::can::{BitField, TraceBit, TraceFrame};
 
 use crate::sim::Snapshot;
 
@@ -39,6 +40,8 @@ pub struct ScopeWindow {
     differential: bool,
     /// Volts per division of the vertical axis.
     volts_per_div: f32,
+    /// How many frames back the bit ruler is pinned, counted from the newest.
+    frame_back: usize,
 }
 
 impl ScopeWindow {
@@ -149,7 +152,9 @@ impl ScopeWindow {
 
     fn plot(&mut self, ui: &mut egui::Ui, snapshot: &Snapshot) {
         let scope = &snapshot.scopes[self.selected];
-        let height = (ui.available_height() - 8.0).max(180.0);
+        let frames: Vec<&TraceFrame> = scope.visible_frames().collect();
+        let decode_height = if frames.is_empty() { 0.0 } else { 168.0 };
+        let height = (ui.available_height() - decode_height - 8.0).max(140.0);
         let (response, painter) = ui.allocate_painter(
             Vec2::new(ui.available_width(), height),
             egui::Sense::hover(),
@@ -260,7 +265,250 @@ impl ScopeWindow {
             Color32::GRAY,
         );
         let _ = self.volts_per_div;
+
+        if !frames.is_empty() {
+            ui.separator();
+            self.bit_ruler(ui, first, span, &frames);
+            self.decode_details(ui, &frames);
+        }
     }
+
+    /// One cell per bit under the trace, on the same time axis, so a bit can be
+    /// matched with the waveform above it. Hovering a cell names the bit.
+    fn bit_ruler(&self, ui: &mut egui::Ui, first: u64, span: u64, frames: &[&TraceFrame]) {
+        let (response, painter) = ui.allocate_painter(
+            Vec2::new(ui.available_width(), 46.0),
+            egui::Sense::hover(),
+        );
+        let rect = response.rect;
+        painter.rect_filled(rect, 3.0, Color32::from_rgb(14, 20, 24));
+        let cells = Rect::from_min_max(
+            Pos2::new(rect.left() + 1.0, rect.top() + 13.0),
+            Pos2::new(rect.right() - 1.0, rect.bottom() - 1.0),
+        );
+        let x_of = |time_ns: u64| {
+            rect.left() + rect.width() * time_ns.saturating_sub(first) as f32 / span as f32
+        };
+        // Bit boundaries come from the sample times, so a cell ends where the
+        // next sample was taken.
+        let cell_end = |frame: &TraceFrame, index: usize| {
+            let step = (frame.end_ns - frame.start_ns) / frame.bits.len().max(1) as u64;
+            frame
+                .bits
+                .get(index + 1)
+                .map(|next| next.time_ns)
+                .unwrap_or(frame.bits[index].time_ns.saturating_add(step.max(1)))
+        };
+
+        let caption_font = egui::FontId::proportional(9.0);
+        for frame in frames {
+            for (index, bit) in frame.bits.iter().enumerate() {
+                let x0 = x_of(bit.time_ns).max(cells.left());
+                let x1 = x_of(cell_end(frame, index)).min(cells.right()).max(x0 + 0.5);
+                if x0 >= cells.right() || x1 <= cells.left() {
+                    continue;
+                }
+                let color = field_color(bit.field);
+                let fill = if bit.dominant {
+                    color
+                } else {
+                    color.gamma_multiply(0.28)
+                };
+                painter.rect_filled(
+                    Rect::from_min_max(Pos2::new(x0, cells.top()), Pos2::new(x1, cells.bottom())),
+                    0.0,
+                    fill,
+                );
+            }
+            // Field names above the cells, whenever the field is wide enough.
+            let mut index = 0;
+            while index < frame.bits.len() {
+                let field = frame.bits[index].field;
+                let mut last = index;
+                while last + 1 < frame.bits.len() && frame.bits[last + 1].field == field {
+                    last += 1;
+                }
+                let x0 = x_of(frame.bits[index].time_ns).max(cells.left());
+                let x1 = x_of(cell_end(frame, last)).min(cells.right());
+                if x1 - x0 >= 22.0 {
+                    painter.text(
+                        Pos2::new((x0 + x1) / 2.0, rect.top() + 1.0),
+                        egui::Align2::CENTER_TOP,
+                        field.label(),
+                        caption_font.clone(),
+                        field_color(field),
+                    );
+                }
+                index = last + 1;
+            }
+        }
+
+        let Some(pointer) = response.hover_pos().filter(|pos| cells.contains(*pos)) else {
+            return;
+        };
+        let mut hit = None;
+        for frame in frames.iter().rev() {
+            for (index, bit) in frame.bits.iter().enumerate() {
+                let x0 = x_of(bit.time_ns);
+                let x1 = x_of(cell_end(frame, index)).max(x0 + 0.5);
+                if pointer.x >= x0 && pointer.x < x1 {
+                    hit = Some((index, *frame, *bit));
+                    break;
+                }
+            }
+            if hit.is_some() {
+                break;
+            }
+        }
+        let Some((index, frame, bit)) = hit else {
+            return;
+        };
+        response.on_hover_ui(|ui| {
+            bit_tooltip(ui, index, frame, bit);
+        });
+    }
+
+    /// The newest frame written out bit by bit, so every bit can be read even
+    /// when the waveform is far too dense to label each cell.
+    fn decode_details(&mut self, ui: &mut egui::Ui, frames: &[&TraceFrame]) {
+        let count = frames.len();
+        self.frame_back = self.frame_back.min(count - 1);
+        let index = count - 1 - self.frame_back;
+        let trace = frames[index];
+
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("CAN 帧解码").strong());
+            ui.label(
+                RichText::new(format!("第 {} / {} 帧", index + 1, count))
+                    .small()
+                    .color(Color32::GRAY),
+            );
+            if ui
+                .add_enabled(index > 0, egui::Button::new("◀").small())
+                .clicked()
+            {
+                self.frame_back += 1;
+            }
+            if ui
+                .add_enabled(index + 1 < count, egui::Button::new("▶").small())
+                .clicked()
+            {
+                self.frame_back = self.frame_back.saturating_sub(1);
+            }
+            if !trace.crc_ok {
+                ui.colored_label(Color32::from_rgb(230, 110, 110), "CRC 错误");
+            }
+            if !trace.acknowledged {
+                ui.colored_label(Color32::from_rgb(230, 170, 80), "无应答");
+            }
+            ui.label(RichText::new(frame_summary(trace)).small().color(Color32::GRAY));
+        });
+
+        egui::ScrollArea::vertical()
+            .id_salt("scope-frame-bits")
+            .max_height(104.0)
+            .show(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    for (position, bit) in trace.bits.iter().enumerate() {
+                        ui.label(
+                            RichText::new(format!("{position}·{}={}", bit.caption(), bit.value()))
+                                .monospace()
+                                .size(10.0)
+                                .color(field_color(bit.field)),
+                        );
+                    }
+                });
+            });
+    }
+}
+
+/// Colour of one field on the bit ruler.
+fn field_color(field: BitField) -> Color32 {
+    match field {
+        BitField::StartOfFrame => Color32::from_rgb(235, 120, 120),
+        BitField::Identifier => Color32::from_rgb(110, 170, 240),
+        BitField::SubstituteRemoteRequest | BitField::IdentifierExtension => {
+            Color32::from_rgb(150, 140, 230)
+        }
+        BitField::RemoteRequest => Color32::from_rgb(120, 150, 225),
+        BitField::Reserved => Color32::from_rgb(130, 140, 160),
+        BitField::DataLength => Color32::from_rgb(230, 180, 90),
+        BitField::Data => Color32::from_rgb(120, 210, 160),
+        BitField::Crc => Color32::from_rgb(200, 140, 220),
+        BitField::CrcDelimiter | BitField::AcknowledgeDelimiter => {
+            Color32::from_rgb(150, 150, 160)
+        }
+        BitField::Acknowledge => Color32::from_rgb(240, 200, 110),
+        BitField::EndOfFrame => Color32::from_rgb(150, 160, 180),
+        BitField::Intermission => Color32::from_rgb(110, 120, 135),
+        BitField::Stuff => Color32::from_rgb(105, 105, 115),
+    }
+}
+
+/// Text of the hover box of one bit.
+fn bit_tooltip(ui: &mut egui::Ui, index: usize, frame: &TraceFrame, bit: TraceBit) {
+    ui.label(
+        RichText::new(format!("位 #{index} · {}", bit.caption()))
+            .strong()
+            .color(field_color(bit.field)),
+    );
+    ui.label(format!("电平 {}", bit.level_label()));
+    ui.label(format!("逻辑值 {}", bit.value()));
+    ui.label(
+        RichText::new(format!("{:.3} ms", bit.time_ns as f64 / 1e6))
+            .small()
+            .color(Color32::GRAY),
+    );
+    if let Some(decoded) = frame.frame {
+        ui.label(
+            RichText::new(format!(
+                "{} ID={}",
+                if decoded.extended { "扩展帧" } else { "标准帧" },
+                decoded.id_label()
+            ))
+            .small()
+            .color(Color32::GRAY),
+        );
+    }
+}
+
+/// One line summary of a decoded frame.
+fn frame_summary(trace: &TraceFrame) -> String {
+    let mut parts = Vec::new();
+    match trace.frame {
+        Some(frame) => {
+            parts.push(format!(
+                "{}{}",
+                if frame.extended { "扩展" } else { "标准" },
+                if frame.remote { "远程帧" } else { "数据帧" }
+            ));
+            parts.push(format!("ID={}", frame.id_label()));
+            parts.push(format!("DLC={}", frame.dlc));
+            parts.push(format!("数据 {}", frame.data_label()));
+        }
+        None => parts.push("帧头未完整".to_string()),
+    }
+    parts.push(format!(
+        "{:.3} – {:.3} ms",
+        trace.start_ns as f64 / 1e6,
+        trace.end_ns as f64 / 1e6
+    ));
+    parts.push(format!(
+        "{} 位（{} 填充）",
+        trace.bits.len(),
+        trace.stuff_bits()
+    ));
+    parts.push(if trace.crc_ok {
+        "CRC ✓".to_string()
+    } else {
+        "CRC ✗".to_string()
+    });
+    parts.push(if trace.acknowledged {
+        "已应答".to_string()
+    } else {
+        "无应答".to_string()
+    });
+    parts.join(" · ")
 }
 
 /// Rectangle a probe occupies on the canvas, used by the symbol painter.

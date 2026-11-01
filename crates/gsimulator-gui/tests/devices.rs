@@ -861,6 +861,18 @@ fn a_frame_from_another_node_reaches_the_controller_over_the_drawn_wire() {
         handle.peak_differential() > 1.9,
         "dominant bits reach the pair"
     );
+    // The probe decodes the burst it captured, bit by bit.
+    let decoded = handle.frames().back().expect("the probe decoded the frame");
+    assert!(decoded.complete);
+    assert!(decoded.crc_ok, "the pair is terminated, so the CRC is good");
+    assert!(decoded.acknowledged, "a receiver acknowledged the frame");
+    assert_eq!(decoded.frame.map(|frame| frame.id), Some(0x321));
+    let captions: Vec<String> = decoded.bits.iter().map(|bit| bit.caption()).collect();
+    assert_eq!(captions.first().map(String::as_str), Some("SOF"));
+    assert!(captions.contains(&"ID10".to_string()), "{captions:?}");
+    assert!(captions.contains(&"数据0".to_string()), "{captions:?}");
+    assert!(captions.contains(&"CRC14".to_string()), "{captions:?}");
+    assert!(captions.contains(&"EOF0".to_string()), "{captions:?}");
 }
 
 #[test]

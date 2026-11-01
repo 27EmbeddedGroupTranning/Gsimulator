@@ -2,10 +2,14 @@
 //!
 //! The part is a passive probe: the bridge that owns the wiring pushes one
 //! sample per simulated bit, the scope keeps a ring buffer trimmed to the on
-//! screen time window and the scope window renders it. It never drives the
+//! screen time window and the scope window renders it. The same samples feed a
+//! [`TraceDecoder`], which rebuilds the frames on the wire bit by bit so the
+//! window can caption what every single bit means. The probe never drives the
 //! bus, so it cannot change what the simulated network does.
 
 use std::collections::VecDeque;
+
+use gsim_core::can::{TraceDecoder, TraceFrame};
 
 /// Default width of the on screen window.
 pub const DEFAULT_WINDOW_NS: u64 = 2_000_000;
@@ -42,6 +46,8 @@ pub struct Oscilloscope {
     samples: VecDeque<ScopeSample>,
     /// Set while the trace is frozen.
     frozen: bool,
+    /// Rebuilds the frames the sampled levels belong to.
+    decoder: TraceDecoder,
 }
 
 impl Default for Oscilloscope {
@@ -61,6 +67,7 @@ impl Oscilloscope {
             window_ns: DEFAULT_WINDOW_NS,
             samples: VecDeque::new(),
             frozen: false,
+            decoder: TraceDecoder::new(),
         }
     }
 
@@ -94,8 +101,19 @@ impl Oscilloscope {
         if self.frozen {
             return;
         }
+        self.decoder.feed(sample.dominant, sample.time_ns);
         self.samples.push_back(sample);
         self.trim();
+    }
+
+    /// Frames rebuilt from the sampled bits, oldest first.
+    pub fn frames(&self) -> &VecDeque<TraceFrame> {
+        self.decoder.frames()
+    }
+
+    /// `true` while a frame is being shifted in.
+    pub fn decoding(&self) -> bool {
+        self.decoder.active()
     }
 
     /// Frozen scopes keep what they have; running ones forget old samples.
@@ -122,6 +140,7 @@ impl Oscilloscope {
 
     pub fn clear(&mut self) {
         self.samples.clear();
+        self.decoder.clear();
     }
 
     /// Simulated time covered by the stored trace, `None` when it is empty.
@@ -224,5 +243,69 @@ mod tests {
         scope.record(sample(0, true));
         scope.record(sample(5_000, false));
         assert_eq!(scope.sample_step_ns(), 5_000);
+    }
+
+    /// Feeds the whole burst of `frame` the way the bridge does: one sample
+    /// per bit, with a receiver pulling the ACK slot dominant.
+    fn feed_frame(scope: &mut Oscilloscope, frame: gsim_core::CanFrame) {
+        use crate::can_bus::WireLevels;
+        use gsim_core::can::{WireFrame, DOMINANT};
+
+        let wire = WireFrame::encode(&frame);
+        let step = 5_000;
+        for (index, bit) in wire.bits().iter().enumerate() {
+            let level = if index == wire.ack_slot() {
+                DOMINANT
+            } else {
+                *bit
+            };
+            let levels = WireLevels::of(level);
+            scope.record(ScopeSample {
+                time_ns: index as u64 * step,
+                can_h: levels.can_h,
+                can_l: levels.can_l,
+                dominant: level == DOMINANT,
+                glitch: false,
+            });
+        }
+    }
+
+    #[test]
+    fn the_probe_captions_the_bits_of_a_frame_it_captured() {
+        let mut scope = Oscilloscope::new("s");
+        scope.set_window_ns(10_000_000);
+        let frame = gsim_core::CanFrame::standard(0x321, b"GSIM");
+        feed_frame(&mut scope, frame);
+
+        let frames = scope.frames();
+        assert_eq!(frames.len(), 1, "the probe decodes the burst it saw");
+        let trace = &frames[0];
+        assert!(trace.complete);
+        assert!(trace.crc_ok);
+        assert!(trace.acknowledged);
+        assert_eq!(trace.frame, Some(frame));
+        assert_eq!(trace.bits.len(), scope.samples().len());
+        assert_eq!(trace.bits[0].caption(), "SOF");
+        assert!(trace.bits.iter().any(|bit| bit.caption() == "数据31"));
+        assert!(trace.bits.iter().any(|bit| bit.caption() == "EOF0"));
+        assert!(trace.end_ns > trace.start_ns);
+        assert!(!scope.decoding());
+    }
+
+    #[test]
+    fn a_frozen_probe_stops_decoding_and_clearing_drops_the_frames() {
+        let mut scope = Oscilloscope::new("s");
+        scope.set_window_ns(10_000_000);
+        feed_frame(&mut scope, gsim_core::CanFrame::standard(0x100, &[1]));
+        assert_eq!(scope.frames().len(), 1);
+
+        scope.set_frozen(true);
+        feed_frame(&mut scope, gsim_core::CanFrame::standard(0x200, &[2]));
+        assert_eq!(scope.frames().len(), 1);
+
+        scope.set_frozen(false);
+        scope.clear();
+        assert!(scope.frames().is_empty());
+        assert!(scope.samples().is_empty());
     }
 }

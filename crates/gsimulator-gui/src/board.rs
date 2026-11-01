@@ -829,7 +829,8 @@ impl Board {
     /// device library.
     pub fn new_project() -> Self {
         let mut board = Board::new();
-        let hse = board.add_hse_crystal(Pos2::new(300.0, 470.0));
+        // Left of the chip, level with PD0/PD1 (OSC_IN/OSC_OUT).
+        let hse = board.add_hse_crystal(Pos2::new(-64.0, 148.0));
         for (index, (port, pin)) in [(CRYSTAL_X1, HSE_PINS[0]), (CRYSTAL_X2, HSE_PINS[1])] {
             board.connect(
                 PinRef::Device {
@@ -930,8 +931,9 @@ impl Board {
             );
         }
 
-        // 8 MHz HSE between OSC_IN and OSC_OUT.
-        let hse = board.add_hse_crystal(Pos2::new(300.0, 470.0));
+        // 8 MHz HSE between OSC_IN and OSC_OUT, left of the chip like the
+        // real part sits next to PD0/PD1.
+        let hse = board.add_hse_crystal(Pos2::new(-64.0, 148.0));
         for (index, (port, pin)) in [(CRYSTAL_X1, HSE_PINS[0]), (CRYSTAL_X2, HSE_PINS[1])] {
             board.connect(
                 PinRef::Device {
@@ -2080,6 +2082,11 @@ mod tests {
         let board = Board::new_project();
         let kinds: Vec<DeviceKind> = board.devices().iter().map(|device| device.kind).collect();
         assert_eq!(kinds, vec![DeviceKind::HseCrystal]);
+        let crystal = board.first_of(DeviceKind::HseCrystal).expect("HSE");
+        assert!(
+            crystal.pos.x < 0.0 && (140.0..200.0).contains(&crystal.pos.y),
+            "the crystal belongs left of the chip, next to PD0/PD1"
+        );
         assert_eq!(board.wires().len(), 2, "X1/X2 already wired to OSC_IN/OUT");
         assert_eq!(
             board.crystals(),

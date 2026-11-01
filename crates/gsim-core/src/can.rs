@@ -5,6 +5,8 @@
 //! `gsim-devices` exchange this single value type, so a frame never has to be
 //! re-encoded when it crosses a module boundary.
 
+use std::collections::VecDeque;
+
 /// Direction of a frame relative to the controller that reported it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum CanDirection {
@@ -604,6 +606,729 @@ impl FrameDecoder {
             dlc,
             data: [0; 8],
         });
+    }
+}
+
+// --------------------------------------------------------------- trace decode
+
+/// Part of a frame one sampled bit carries, in transmission order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BitField {
+    /// Start of frame.
+    StartOfFrame,
+    /// Standard identifier, base identifier or the extended part of one.
+    Identifier,
+    /// Substitute remote request (extended frames only).
+    SubstituteRemoteRequest,
+    /// Identifier extension, which chooses the frame format.
+    IdentifierExtension,
+    /// Remote transmission request.
+    RemoteRequest,
+    /// Reserved bit: `r0`, or `r1` in an extended frame.
+    Reserved,
+    /// Data length code.
+    DataLength,
+    /// One payload bit.
+    Data,
+    /// One bit of the CRC-15 sequence.
+    Crc,
+    /// CRC delimiter.
+    CrcDelimiter,
+    /// ACK slot, dominant when a receiver accepted the frame.
+    Acknowledge,
+    /// ACK delimiter.
+    AcknowledgeDelimiter,
+    /// End of frame.
+    EndOfFrame,
+    /// Intermission before any node may start the next frame.
+    Intermission,
+    /// Bit inserted by the stuffing rule; not part of the frame content.
+    Stuff,
+}
+
+impl BitField {
+    /// Caption of a whole field, used as a group title.
+    pub fn label(self) -> &'static str {
+        match self {
+            BitField::StartOfFrame => "SOF",
+            BitField::Identifier => "ID",
+            BitField::SubstituteRemoteRequest => "SRR",
+            BitField::IdentifierExtension => "IDE",
+            BitField::RemoteRequest => "RTR",
+            BitField::Reserved => "r0/r1",
+            BitField::DataLength => "DLC",
+            BitField::Data => "数据",
+            BitField::Crc => "CRC",
+            BitField::CrcDelimiter => "CRC界定",
+            BitField::Acknowledge => "ACK槽",
+            BitField::AcknowledgeDelimiter => "ACK界定",
+            BitField::EndOfFrame => "EOF",
+            BitField::Intermission => "IFS",
+            BitField::Stuff => "填充",
+        }
+    }
+}
+
+/// One bit of a frame, exactly as the probe sampled it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TraceBit {
+    /// Simulated time the bit was sampled at.
+    pub time_ns: u64,
+    /// `true` when the wire was dominant, which carries a logical `0`.
+    pub dominant: bool,
+    pub field: BitField,
+    /// Position inside the field, counted from its most significant bit.
+    pub field_bit: u8,
+}
+
+impl TraceBit {
+    /// Logical value the level stands for: dominant is a `0`.
+    pub fn value(&self) -> u8 {
+        u8::from(!self.dominant)
+    }
+
+    /// Level as the scope shows it.
+    pub fn level_label(&self) -> &'static str {
+        if self.dominant {
+            "显性"
+        } else {
+            "隐性"
+        }
+    }
+
+    /// `SOF`, `ID10`, `数据3`, `CRC14` … caption of this single bit.
+    pub fn caption(&self) -> String {
+        match self.field {
+            BitField::StartOfFrame
+            | BitField::SubstituteRemoteRequest
+            | BitField::IdentifierExtension
+            | BitField::RemoteRequest
+            | BitField::Acknowledge
+            | BitField::AcknowledgeDelimiter
+            | BitField::CrcDelimiter
+            | BitField::Stuff => self.field.label().to_string(),
+            BitField::Reserved => format!("r{}", self.field_bit),
+            _ => format!("{}{}", self.field.label(), self.field_bit),
+        }
+    }
+}
+
+/// A frame the probe rebuilt from the sampled levels.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TraceFrame {
+    /// Sample time of the start of frame bit.
+    pub start_ns: u64,
+    /// Sample time of the last intermission bit.
+    pub end_ns: u64,
+    /// Every bit that crossed the wire, stuffed ones included.
+    pub bits: Vec<TraceBit>,
+    /// Frame content; `None` only when the header never arrived.
+    pub frame: Option<CanFrame>,
+    pub crc_ok: bool,
+    /// `true` when some receiver pulled the ACK slot dominant.
+    pub acknowledged: bool,
+    /// `true` for frames that reached the intermission in order.
+    pub complete: bool,
+}
+
+impl TraceFrame {
+    /// Bits the stuffing rule inserted.
+    pub fn stuff_bits(&self) -> usize {
+        self.bits
+            .iter()
+            .filter(|bit| bit.field == BitField::Stuff)
+            .count()
+    }
+
+    /// Payload bits the frame really carries.
+    pub fn payload_bits(&self) -> usize {
+        self.bits.len() - self.stuff_bits()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum TracePhase {
+    #[default]
+    Idle,
+    /// Start of frame through the CRC sequence (the stuffed region).
+    Stuffed,
+    AckSlot,
+    AckDelimiter,
+    Eof,
+    Intermission,
+}
+
+/// Longest burst the decoder follows before it gives up on a frame.
+const MAX_TRACE_BITS: usize = 400;
+/// Frames a decoder keeps for the scope.
+pub const TRACE_HISTORY: usize = 16;
+
+/// Rebuilds frames from the levels an oscilloscope sampled.
+///
+/// Unlike [`FrameDecoder`], which only reports the frame content, this keeps
+/// every bit it saw - stuffed ones included - so a scope can caption the whole
+/// burst under the trace. Frames are published only once they reached the
+/// intermission, which keeps a probe placed in the middle of a frame from
+/// showing nonsense.
+#[derive(Clone, Debug)]
+pub struct TraceDecoder {
+    capacity: usize,
+    frames: VecDeque<TraceFrame>,
+    /// Sampled level of every bit of the frame in progress, in time order.
+    levels: Vec<(u64, bool)>,
+    /// Parallel to `levels`: `true` when the bit was inserted by stuffing.
+    stuff: Vec<bool>,
+    /// Number of non-stuffed bits collected so far.
+    payload_len: usize,
+    phase: TracePhase,
+    run: u8,
+    last: Option<bool>,
+    extended: bool,
+    remote: bool,
+    dlc: u8,
+    eof: u8,
+    ifs: u8,
+    acknowledged: bool,
+}
+
+impl Default for TraceDecoder {
+    fn default() -> Self {
+        TraceDecoder::new()
+    }
+}
+
+impl TraceDecoder {
+    pub fn new() -> Self {
+        TraceDecoder::with_capacity(TRACE_HISTORY)
+    }
+
+    pub fn with_capacity(capacity: usize) -> Self {
+        TraceDecoder {
+            capacity: capacity.max(1),
+            frames: VecDeque::new(),
+            levels: Vec::new(),
+            stuff: Vec::new(),
+            payload_len: 0,
+            phase: TracePhase::Idle,
+            run: 0,
+            last: None,
+            extended: false,
+            remote: false,
+            dlc: 0,
+            eof: 0,
+            ifs: 0,
+            acknowledged: false,
+        }
+    }
+
+    /// Decoded frames, oldest first.
+    pub fn frames(&self) -> &VecDeque<TraceFrame> {
+        &self.frames
+    }
+
+    /// Drops the decoded frames and any frame in progress.
+    pub fn clear(&mut self) {
+        self.frames.clear();
+        self.reset_frame();
+    }
+
+    /// `true` while a frame is being received.
+    pub fn active(&self) -> bool {
+        self.phase != TracePhase::Idle
+    }
+
+    /// Feeds the level sampled for one bit time.
+    pub fn feed(&mut self, dominant: bool, time_ns: u64) {
+        let level = if dominant { DOMINANT } else { RECESSIVE };
+        match self.phase {
+            TracePhase::Idle => {
+                if level == DOMINANT {
+                    self.begin(level, time_ns);
+                }
+            }
+            TracePhase::Stuffed => {
+                // Destuffing: the bit after five identical ones is inserted by
+                // the transmitter and is never part of the frame content.
+                if self.run >= 5 {
+                    if Some(level) == self.last {
+                        self.reset_frame();
+                        return;
+                    }
+                    self.push(level, time_ns, true);
+                    self.run = 1;
+                    self.last = Some(level);
+                    return;
+                }
+                if self.sequence_complete() {
+                    if level != RECESSIVE {
+                        self.reset_frame();
+                        return;
+                    }
+                    self.push(level, time_ns, false);
+                    self.phase = TracePhase::AckSlot;
+                    return;
+                }
+                if self.last == Some(level) {
+                    self.run += 1;
+                } else {
+                    self.run = 1;
+                    self.last = Some(level);
+                }
+                let index = self.push(level, time_ns, false);
+                self.collect(index, level);
+                if self.levels.len() > MAX_TRACE_BITS {
+                    self.reset_frame();
+                }
+            }
+            TracePhase::AckSlot => {
+                self.push(level, time_ns, false);
+                self.acknowledged = level == DOMINANT;
+                self.phase = TracePhase::AckDelimiter;
+            }
+            TracePhase::AckDelimiter => {
+                if level != RECESSIVE {
+                    self.reset_frame();
+                    return;
+                }
+                self.push(level, time_ns, false);
+                self.phase = TracePhase::Eof;
+            }
+            TracePhase::Eof => {
+                if level != RECESSIVE {
+                    self.reset_frame();
+                    return;
+                }
+                self.push(level, time_ns, false);
+                self.eof += 1;
+                if self.eof >= 7 {
+                    self.phase = TracePhase::Intermission;
+                }
+            }
+            TracePhase::Intermission => {
+                if level != RECESSIVE {
+                    self.reset_frame();
+                    return;
+                }
+                self.push(level, time_ns, false);
+                self.ifs += 1;
+                if self.ifs >= 3 {
+                    self.complete();
+                }
+            }
+        }
+    }
+
+    fn begin(&mut self, level: bool, time_ns: u64) {
+        self.reset_frame();
+        self.phase = TracePhase::Stuffed;
+        self.run = 1;
+        self.last = Some(level);
+        self.push(level, time_ns, false);
+    }
+
+    fn reset_frame(&mut self) {
+        self.levels.clear();
+        self.stuff.clear();
+        self.payload_len = 0;
+        self.phase = TracePhase::Idle;
+        self.run = 0;
+        self.last = None;
+        self.extended = false;
+        self.remote = false;
+        self.dlc = 0;
+        self.eof = 0;
+        self.ifs = 0;
+        self.acknowledged = false;
+    }
+
+    /// Stores one bit and returns the payload index it occupies, `usize::MAX`
+    /// for a bit inserted by stuffing.
+    fn push(&mut self, level: bool, time_ns: u64, stuff: bool) -> usize {
+        self.levels.push((time_ns, level));
+        self.stuff.push(stuff);
+        if stuff {
+            return usize::MAX;
+        }
+        let index = self.payload_len;
+        self.payload_len += 1;
+        index
+    }
+
+    /// Accumulates the fields the decoder needs to know where the frame ends.
+    fn collect(&mut self, index: usize, level: bool) {
+        if index == 13 {
+            self.extended = level == RECESSIVE;
+            if self.extended {
+                // Bit 12 of an extended frame is the substitute remote
+                // request, not a remote transmission request.
+                self.remote = false;
+            }
+            return;
+        }
+        let remote_bit = if self.extended { 32 } else { 12 };
+        if index == remote_bit {
+            self.remote = level == RECESSIVE;
+            return;
+        }
+        let dlc_start = if self.extended { 35 } else { 15 };
+        if (dlc_start..dlc_start + 4).contains(&index) {
+            self.dlc = (self.dlc << 1) | u8::from(level == RECESSIVE);
+        }
+    }
+
+    fn header_len(&self) -> usize {
+        if self.extended {
+            39
+        } else {
+            19
+        }
+    }
+
+    fn data_len(&self) -> usize {
+        if self.remote {
+            0
+        } else {
+            usize::from(self.dlc.min(8)) * 8
+        }
+    }
+
+    /// Payload index of the first CRC bit.
+    fn crc_start(&self) -> usize {
+        self.header_len() + self.data_len()
+    }
+
+    /// `true` once header, data and the CRC sequence are in, so only a stuff
+    /// bit and the CRC delimiter may follow.
+    fn sequence_complete(&self) -> bool {
+        self.payload_len >= self.crc_start() + 15
+    }
+
+    /// Collected bits without the ones the stuffing rule inserted.
+    fn payload(&self) -> Vec<bool> {
+        self.levels
+            .iter()
+            .zip(self.stuff.iter())
+            .filter(|(_, stuff)| !**stuff)
+            .map(|((_, level), _)| *level)
+            .collect()
+    }
+
+    fn complete(&mut self) {
+        let payload = self.payload();
+        let crc_start = self.crc_start();
+        let crc_ok = if payload.len() >= crc_start + 15 {
+            let mut received = 0u16;
+            for bit in &payload[crc_start..crc_start + 15] {
+                received = (received << 1) | u16::from(*bit == RECESSIVE);
+            }
+            crc15(payload[..crc_start].iter().copied()) == received
+        } else {
+            false
+        };
+        let frame = self.decode_frame(&payload);
+        let bits = self.annotate();
+        let start_ns = bits.first().map(|bit| bit.time_ns).unwrap_or(0);
+        let end_ns = bits.last().map(|bit| bit.time_ns).unwrap_or(start_ns);
+        self.frames.push_back(TraceFrame {
+            start_ns,
+            end_ns,
+            bits,
+            frame,
+            crc_ok,
+            acknowledged: self.acknowledged,
+            complete: true,
+        });
+        while self.frames.len() > self.capacity {
+            self.frames.pop_front();
+        }
+        self.reset_frame();
+    }
+
+    /// Turns the collected levels into frame content.
+    fn decode_frame(&self, payload: &[bool]) -> Option<CanFrame> {
+        let crc_start = self.crc_start();
+        if payload.len() < crc_start + 15 {
+            return None;
+        }
+        let bit_at = |index: usize| u32::from(payload[index] == RECESSIVE);
+        let mut id = 0u32;
+        for index in 1..=11 {
+            id = (id << 1) | bit_at(index);
+        }
+        if self.extended {
+            for index in 14..=31 {
+                id = (id << 1) | bit_at(index);
+            }
+        }
+        let dlc = self.dlc.min(8);
+        let mut data = [0u8; 8];
+        if !self.remote {
+            let header = self.header_len();
+            for byte in 0..usize::from(dlc) {
+                let mut value = 0u8;
+                for bit in 0..8 {
+                    value = (value << 1) | u8::from(payload[header + byte * 8 + bit] == RECESSIVE);
+                }
+                data[byte] = value;
+            }
+        }
+        Some(CanFrame {
+            id,
+            extended: self.extended,
+            remote: self.remote,
+            dlc,
+            data,
+        })
+    }
+
+    /// Labels every collected bit with the field it belongs to.
+    fn annotate(&self) -> Vec<TraceBit> {
+        let mut bits = Vec::with_capacity(self.levels.len());
+        let mut index = 0;
+        for (position, (time_ns, level)) in self.levels.iter().enumerate() {
+            let (field, field_bit) = if self.stuff[position] {
+                (BitField::Stuff, 0)
+            } else {
+                let labelled = self.field_for(index);
+                index += 1;
+                labelled
+            };
+            bits.push(TraceBit {
+                time_ns: *time_ns,
+                dominant: *level == DOMINANT,
+                field,
+                field_bit,
+            });
+        }
+        bits
+    }
+
+    fn field_for(&self, index: usize) -> (BitField, u8) {
+        if index == 0 {
+            return (BitField::StartOfFrame, 0);
+        }
+        let crc_start = self.crc_start();
+        if index >= crc_start {
+            return match index - crc_start {
+                0..=14 => (BitField::Crc, (crc_start + 14 - index) as u8),
+                15 => (BitField::CrcDelimiter, 0),
+                16 => (BitField::Acknowledge, 0),
+                17 => (BitField::AcknowledgeDelimiter, 0),
+                18..=24 => (BitField::EndOfFrame, (crc_start + 24 - index) as u8),
+                _ => (BitField::Intermission, (crc_start + 27).saturating_sub(index) as u8),
+            };
+        }
+        if index <= 11 {
+            let msb = if self.extended { 28 } else { 10 };
+            return (BitField::Identifier, (msb + 1 - index) as u8);
+        }
+        match index {
+            12 => {
+                if self.extended {
+                    (BitField::SubstituteRemoteRequest, 0)
+                } else {
+                    (BitField::RemoteRequest, 0)
+                }
+            }
+            13 => (BitField::IdentifierExtension, 0),
+            _ if self.extended => match index {
+                14..=31 => (BitField::Identifier, (31 - index) as u8),
+                32 => (BitField::RemoteRequest, 0),
+                33 => (BitField::Reserved, 1),
+                34 => (BitField::Reserved, 0),
+                35..=38 => (BitField::DataLength, (38 - index) as u8),
+                _ => (BitField::Data, (index - self.header_len()) as u8),
+            },
+            _ => match index {
+                14 => (BitField::Reserved, 0),
+                15..=18 => (BitField::DataLength, (18 - index) as u8),
+                _ => (BitField::Data, (index - self.header_len()) as u8),
+            },
+        }
+    }
+}
+
+#[cfg(test)]
+mod trace_tests {
+    use super::*;
+
+    /// Feeds the whole burst of `frame`, driving the ACK slot when asked.
+    fn decode(frame: CanFrame, acknowledge: bool) -> TraceDecoder {
+        let wire = WireFrame::encode(&frame);
+        let mut decoder = TraceDecoder::new();
+        let mut time = 0;
+        for (index, bit) in wire.bits().iter().enumerate() {
+            let level = if acknowledge && index == wire.ack_slot() {
+                DOMINANT
+            } else {
+                *bit
+            };
+            decoder.feed(level == DOMINANT, time);
+            time += 4_000;
+        }
+        decoder
+    }
+
+    #[test]
+    fn a_standard_frame_is_captioned_bit_by_bit() {
+        let frame = CanFrame::standard(0x123, b"GS");
+        let decoder = decode(frame, true);
+        let decoded = decoder.frames().back().expect("a decoded frame");
+        assert!(decoded.complete);
+        assert_eq!(decoded.frame, Some(frame));
+        assert!(decoded.crc_ok);
+        assert!(decoded.acknowledged);
+        assert_eq!(decoded.bits.len(), WireFrame::encode(&frame).len());
+        assert_eq!(decoded.start_ns, 0);
+        assert!(decoded.end_ns > decoded.start_ns);
+
+        let captions: Vec<String> = decoded.bits.iter().map(TraceBit::caption).collect();
+        assert_eq!(captions.first().map(String::as_str), Some("SOF"));
+        assert_eq!(captions.last().map(String::as_str), Some("IFS0"));
+        assert!(captions.contains(&"ID10".to_string()), "{captions:?}");
+        assert!(captions.contains(&"ID0".to_string()), "{captions:?}");
+        assert!(captions.contains(&"RTR".to_string()), "{captions:?}");
+        assert!(captions.contains(&"IDE".to_string()), "{captions:?}");
+        assert!(captions.contains(&"r0".to_string()), "{captions:?}");
+        assert!(captions.contains(&"DLC3".to_string()), "{captions:?}");
+        assert!(captions.contains(&"数据0".to_string()), "{captions:?}");
+        assert!(captions.contains(&"CRC14".to_string()), "{captions:?}");
+        assert!(captions.contains(&"ACK槽".to_string()), "{captions:?}");
+        assert!(captions.contains(&"EOF6".to_string()), "{captions:?}");
+    }
+
+    #[test]
+    fn the_identifier_bits_carry_the_identifier() {
+        // 0x123 is 001 0010 0011: ID10 is dominant, ID8 recessive.
+        let frame = CanFrame::standard(0x123, &[]);
+        let decoder = decode(frame, true);
+        let decoded = decoder.frames().back().expect("a decoded frame");
+        let identifier: Vec<TraceBit> = decoded
+            .bits
+            .iter()
+            .copied()
+            .filter(|bit| bit.field == BitField::Identifier)
+            .collect();
+        assert_eq!(identifier.len(), 11);
+        assert_eq!(identifier[0].caption(), "ID10");
+        assert!(identifier[0].dominant);
+        assert_eq!(identifier[1].caption(), "ID9");
+        assert!(identifier[1].dominant);
+        assert_eq!(identifier[2].caption(), "ID8");
+        assert!(!identifier[2].dominant);
+        assert_eq!(identifier[10].caption(), "ID0");
+        assert!(!identifier[10].dominant);
+    }
+
+    #[test]
+    fn an_extended_frame_is_labelled_with_srr_and_the_long_identifier() {
+        let frame = CanFrame::extended(0x18DA_F110, &[0xDE, 0xAD]);
+        let decoder = decode(frame, true);
+        let decoded = decoder.frames().back().expect("a decoded frame");
+        assert_eq!(decoded.frame, Some(frame));
+        let captions: Vec<String> = decoded.bits.iter().map(TraceBit::caption).collect();
+        assert!(captions.contains(&"SRR".to_string()), "{captions:?}");
+        assert!(captions.contains(&"ID17".to_string()), "{captions:?}");
+        assert!(captions.contains(&"r1".to_string()), "{captions:?}");
+        assert!(captions.contains(&"数据15".to_string()), "{captions:?}");
+        assert_eq!(decoded.payload_bits(), 39 + 16 + 15 + 13);
+    }
+
+    #[test]
+    fn stuffed_bits_are_marked_and_do_not_count_as_payload() {
+        // Eleven dominant identifier bits force two stuff bits.
+        let frame = CanFrame::standard(0x000, &[]);
+        let decoder = decode(frame, true);
+        let decoded = decoder.frames().back().expect("a decoded frame");
+        assert!(decoded.stuff_bits() >= 1);
+        assert_eq!(decoded.payload_bits(), 19 + 15 + 13);
+        let wire = WireFrame::encode(&frame);
+        assert_eq!(decoded.bits.len(), wire.len());
+        assert_eq!(decoded.frame, Some(frame));
+    }
+
+    #[test]
+    fn a_frame_without_acknowledge_is_reported_as_such() {
+        let frame = CanFrame::standard(0x321, b"GSIM");
+        let decoder = decode(frame, false);
+        let decoded = decoder.frames().back().expect("a decoded frame");
+        assert!(!decoded.acknowledged);
+        assert!(decoded.crc_ok);
+        assert_eq!(decoded.frame, Some(frame));
+    }
+
+    #[test]
+    fn idle_levels_and_partial_bursts_produce_no_frame() {
+        let mut decoder = TraceDecoder::new();
+        for step in 0..64u64 {
+            decoder.feed(false, step * 4_000);
+        }
+        assert!(decoder.frames().is_empty());
+
+        let frame = CanFrame::standard(0x123, b"Hello");
+        let wire = WireFrame::encode(&frame);
+        let mut decoder = TraceDecoder::new();
+        for (index, bit) in wire.bits().iter().enumerate().take(wire.len() / 2) {
+            decoder.feed(*bit == DOMINANT, index as u64 * 4_000);
+        }
+        assert!(decoder.frames().is_empty(), "half a frame is not a frame");
+        assert!(decoder.active());
+    }
+
+    #[test]
+    fn a_flipped_bit_never_passes_the_crc() {
+        let frame = CanFrame::standard(0x123, b"Hello");
+        let wire = WireFrame::encode(&frame);
+        let mut clean = 0;
+        for flip in 0..wire.len() {
+            if flip == wire.ack_slot() {
+                // The ACK slot carries no CRC-covered data.
+                continue;
+            }
+            let mut decoder = TraceDecoder::new();
+            for (index, bit) in wire.bits().iter().enumerate() {
+                let level = if index == flip {
+                    !bit
+                } else if index == wire.ack_slot() {
+                    DOMINANT
+                } else {
+                    *bit
+                };
+                decoder.feed(level == DOMINANT, index as u64 * 4_000);
+            }
+            for trace in decoder.frames() {
+                assert!(!trace.crc_ok, "a flip at bit {flip} passed the CRC");
+            }
+            clean += 1;
+        }
+        assert!(clean > 40);
+    }
+
+    #[test]
+    fn a_second_frame_follows_the_first_after_the_intermission() {
+        let first = CanFrame::standard(0x100, &[1, 2, 3, 4]);
+        let second = CanFrame::standard(0x200, &[5, 6]);
+        let mut decoder = TraceDecoder::new();
+        let mut time = 0;
+        for frame in [first, second] {
+            let wire = WireFrame::encode(&frame);
+            for (index, bit) in wire.bits().iter().enumerate() {
+                let level = if index == wire.ack_slot() {
+                    DOMINANT
+                } else {
+                    *bit
+                };
+                decoder.feed(level == DOMINANT, time);
+                time += 4_000;
+            }
+        }
+        assert_eq!(decoder.frames().len(), 2);
+        let ids: Vec<u32> = decoder
+            .frames()
+            .iter()
+            .filter_map(|trace| trace.frame.map(|frame| frame.id))
+            .collect();
+        assert_eq!(ids, vec![0x100, 0x200]);
     }
 }
 
